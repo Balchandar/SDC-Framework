@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sdc-framework"
+version = "0.1.0"
+description = "SDC — a Markdown-native application compiler. Humans specify software; machines implement it; verification proves the implementation satisfies the specification."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "SDC Contributors" }]
+keywords = ["compiler", "specification", "markdown", "verification", "ai", "codegen"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Compilers",
+]
+# The framework core has ZERO required third-party dependencies: parser, IR,
+# compiler, verifier, codegen and runtime are all stdlib-only so the MVP is
+# reproducible and runs anywhere. Optional providers/targets live in extras.
+dependencies = []
+
+[project.optional-dependencies]
+# Real AI providers are optional plug-ins. The default compiler uses a
+# deterministic local planner and needs none of these.
+anthropic = ["anthropic>=0.39"]
+openai = ["openai>=1.0"]
+google = ["google-generativeai>=0.5"]
+# Optional PostgreSQL adapter for generated applications.
+postgres = ["psycopg[binary]>=3.1"]
+dev = ["pytest>=7", "pytest-timeout>=2"]
+
+[project.scripts]
+sdc = "sdc_cli.main:main"
+
+[tool.setuptools.packages.find]
+where = [
+    "packages/sdc-cli",
+    "packages/sdc-parser",
+    "packages/sdc-ir",
+    "packages/sdc-compiler",
+    "packages/sdc-verifier",
+    "packages/sdc-runtime",
+    "packages/sdc-codegen",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 120
+addopts = "-ra"

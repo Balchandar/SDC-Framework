@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+.pytest_cache/
+.mypy_cache/
+build/
+dist/
+*.verify.log
+
+# SDC build outputs (generated artifacts are never source of truth)
+.build/
+examples/*/.build/
+examples/*/dist/
+
+# venvs / editors
+.venv/
+venv/
+.env
+.vscode/
+.idea/

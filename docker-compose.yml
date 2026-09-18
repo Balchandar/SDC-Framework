@@ -1,0 +1,40 @@
+# Local development stack for an SDC-built service.
+#
+# Build the example first (produces the standalone service and a Dockerfile):
+#   cd examples/customer-api && sdc build
+# then from the repo root:
+#   docker compose up --build
+#
+# The service uses the generated Dockerfile under
+# examples/customer-api/.build/generated/.
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sdc
+      POSTGRES_PASSWORD: sdc
+      POSTGRES_DB: customers
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sdc"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  customer-api:
+    build:
+      context: ./examples/customer-api/.build/generated
+      dockerfile: Dockerfile
+    environment:
+      # In-memory store is used unless a Postgres DATABASE_URL is provided.
+      SDC_JWT_SECRET: "change-me-in-production"
+      PORT: "8080"
+      HOST: "0.0.0.0"
+      # DATABASE_URL: "postgresql://sdc:sdc@db:5432/customers"
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
