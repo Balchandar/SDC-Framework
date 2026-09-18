@@ -52,6 +52,52 @@ shutdown, and automated security + behavioral verification.
 SDC_JWT_SECRET=dev-secret PORT=8080 ./dist/customer-api
 ```
 
+## Example project structure
+
+A project is just a directory of Markdown specification files — one file per
+concern, though the parser merges them however you split them. This is the
+bundled `examples/customer-api`:
+
+```text
+customer-api/
+├── project.md          # Application: name, version, description
+├── api.md              # API: endpoints (GET /customers/{id}, ...)
+├── authentication.md   # Authentication: OAuth2 bearer / JWT
+├── authorization.md    # Authorization: tenant-scoped access rules
+├── data.md             # Data: entities, fields, sensitive/tenant markers
+├── behavior.md         # Behavior: condition -> HTTP status mapping
+├── security.md         # Security: mandatory requirements
+├── performance.md      # Performance: latency / throughput targets
+├── observability.md    # Observability: fields to record, telemetry
+├── deployment.md       # Deployment: target, container, health check
+└── tests/
+    └── behavior.md     # Testing: explicit behavioral test cases
+```
+
+Running `sdc build` inside that directory reads every `.md` file above and
+produces this build output (git-ignored — safe to delete and regenerate):
+
+```text
+customer-api/
+├── .build/
+│   ├── specification.json        # raw spec file set (source of spec hash)
+│   ├── application-ir.json       # canonical Application IR
+│   ├── implementation-plan.json  # validated implementation plan
+│   ├── verification-report.json  # behavioral + security + perf checks
+│   ├── security-report.json      # security-check slice of the report
+│   ├── benchmark-report.json     # performance-check slice of the report
+│   ├── semantic-diff.json        # present once specs change across builds
+│   ├── manifest.json             # hashes, target, verification status
+│   └── generated/                # GENERATED — not the source of truth
+│       ├── service.py            # self-contained standalone service
+│       ├── authorization_policy.json
+│       ├── Dockerfile
+│       ├── container.json
+│       └── GENERATED.md
+└── dist/
+    └── customer-api               # the standalone executable artifact
+```
+
 ## The MVP loop
 
 1. Write the specs (`project.md`, `api.md`, `authentication.md`,
