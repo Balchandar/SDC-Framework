@@ -105,4 +105,4 @@ This is a serious proof-of-concept, not a throwaway demo, but it is an MVP:
 
 ## License
 
-Apache-2.0. See [`LICENSE`](LICENSE).
+Apache-2.0. [`LICENSE`](LICENSE).
