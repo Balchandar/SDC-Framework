@@ -1,154 +1,113 @@
-# SDC — Markdown-Native Application Compiler
+# SDC — Semantic Definition Compiler
 
-> Humans specify software. Machines implement it. Verification establishes that
-> the implementation satisfies the specification.
+> Humans and LLMs describe what the software means. SDC determines how that
+> meaning becomes executable. **The compiler, not the LLM, is the authority.**
 
-SDC is a proof-of-concept software-development model in which developers
-describe an application's **behavior, APIs, data, security, authorization,
-performance, and deployment** in human-readable Markdown. SDC transforms those
-specifications into a strongly typed **Application IR**, uses a
-provider-neutral **AI compiler** to produce a validated implementation plan and
-a generated implementation, **verifies** the implementation against the
-specification by running it, and produces a deployable artifact plus a signed
-manifest.
+SDC is a **specification compiler**. It turns human-readable, LLM-friendly
+Markdown definitions into one immutable, signed, verifiable artifact. A fixed,
+trusted runtime executes that artifact only after proving it is intact,
+compatible and verified.
 
-**The specification files are the source of truth. Generated code is an
-intermediate artifact — safe to delete and regenerate, never the authoritative
-project source.**
+SDC is not an AI code generator, not a set of language backends, not a
+template engine and not a new programming language.
 
 ```text
-Markdown Specs → Parser → Application IR → AI Compiler → Implementation
-                                              ↓
-                            Verification ← (independent) → Optimization → Artifact
+             HUMAN / LLM
+                  │
+                  ▼
+          Markdown Specification        the source        (sourceHash)
+                  │
+                  ▼
+            Semantic IR                 the truth model   (irHash)
+                  │
+                  ▼
+              Compiler
+                  │
+                  ▼
+          Immutable Artifact            the program       (artifactHash)
+                  │
+          ┌───────┴────────┐
+          ▼                ▼
+      Verification      Provenance
+          │                │
+          └───────┬────────┘
+                  ▼
+              Signature                 integrity
+                  │
+                  ▼
+      Runtime (verifies, then executes) behavioral trust through evidence
 ```
-
-## Quickstart
-
-```bash
-pip install -e .
-
-# scaffold a new project
-sdc init my-service
-
-# or use the bundled example
-cd examples/customer-api
-
-sdc validate     # parse + validate the specs
-sdc inspect      # show the Application IR
-sdc compile      # generate the implementation
-sdc verify       # run the implementation and check it against the spec
-sdc build        # validate + compile + verify + produce dist/<name>
-sdc run          # run the generated service locally
-sdc diff A B     # semantic diff between two spec versions
-```
-
-A successful `sdc build` in `examples/customer-api` produces `dist/customer-api`
-— a self-contained, standalone HTTP service (Python stdlib only) implementing
-`GET /customers/{id}` and `GET /customers` with authentication, authorization,
-tenant isolation, structured logging, metrics, health checks, graceful
-shutdown, and automated security + behavioral verification.
-
-```bash
-SDC_JWT_SECRET=dev-secret PORT=8080 ./dist/customer-api
-```
-
-## Example project structure
-
-A project is just a directory of Markdown specification files — one file per
-concern, though the parser merges them however you split them. This is the
-bundled `examples/customer-api`:
-
-```text
-customer-api/
-├── project.md          # Application: name, version, description
-├── api.md              # API: endpoints (GET /customers/{id}, ...)
-├── authentication.md   # Authentication: OAuth2 bearer / JWT
-├── authorization.md    # Authorization: tenant-scoped access rules
-├── data.md             # Data: entities, fields, sensitive/tenant markers
-├── behavior.md         # Behavior: condition -> HTTP status mapping
-├── security.md         # Security: mandatory requirements
-├── performance.md      # Performance: latency / throughput targets
-├── observability.md    # Observability: fields to record, telemetry
-├── deployment.md       # Deployment: target, container, health check
-└── tests/
-    └── behavior.md     # Testing: explicit behavioral test cases
-```
-
-Running `sdc build` inside that directory reads every `.md` file above and
-produces this build output (git-ignored — safe to delete and regenerate):
-
-```text
-customer-api/
-├── .build/
-│   ├── specification.json        # raw spec file set (source of spec hash)
-│   ├── application-ir.json       # canonical Application IR
-│   ├── implementation-plan.json  # validated implementation plan
-│   ├── verification-report.json  # behavioral + security + perf checks
-│   ├── security-report.json      # security-check slice of the report
-│   ├── benchmark-report.json     # performance-check slice of the report
-│   ├── semantic-diff.json        # present once specs change across builds
-│   ├── manifest.json             # hashes, target, verification status
-│   └── generated/                # GENERATED — not the source of truth
-│       ├── service.py            # self-contained standalone service
-│       ├── authorization_policy.json
-│       ├── Dockerfile
-│       ├── container.json
-│       └── GENERATED.md
-└── dist/
-    └── customer-api               # the standalone executable artifact
-```
-
-## The MVP loop
-
-1. Write the specs (`project.md`, `api.md`, `authentication.md`,
-   `authorization.md`, `data.md`, `behavior.md`, `security.md`,
-   `performance.md`, …).
-2. `sdc build` → produces `dist/customer-api` and `.build/*.json` reports.
-3. Change **only** `authorization.md`.
-4. `sdc build` again → SDC detects the semantic change, maps it to affected
-   components, regenerates, re-verifies, emits a **semantic diff** and a new
-   artifact + manifest.
-
-## Why this is not just an LLM wrapper
-
-- The **AI compiler is provider-neutral** (`local`, `anthropic`, `openai`,
-  `google`, custom) and defaults to a **deterministic local planner** so the
-  MVP is fully reproducible and offline.
-- Model output never becomes an artifact directly — the provider produces a
-  **structured plan** that is **validated** before code generation.
-- **Verification is a separate authority.** The compiler never declares its own
-  output correct; the verifier runs the actual generated service over real HTTP
-  and observes behavior.
-- The **IR is deterministic**: identical specs → identical `ir_hash`.
-
-## Packages
-
-| Package | Responsibility |
-|---|---|
-| `sdc-ir` | Strongly typed Application IR, canonicalization, hashing, error taxonomy |
-| `sdc-parser` | Markdown → sections → semantic normalization → IR → validation |
-| `sdc-compiler` | Provider-neutral AI compiler, planning, drift analysis, semantic diff |
-| `sdc-codegen` | Backend abstraction; Python-stdlib HTTP backend |
-| `sdc-runtime` | Stable runtime substrate targeted by generated services |
-| `sdc-verifier` | Independent behavioral, security, and performance verification |
-| `sdc-cli` | The `sdc` command-line compiler and orchestrator |
-
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`docs/`](docs/) for details.
 
 ## Status
 
-This is a serious proof-of-concept, not a throwaway demo, but it is an MVP:
+> **Architecture v1 is FROZEN (2026-09-24).** The frozen contracts live in
+> [`docs/`](docs/ARCHITECTURE.md). The code in `packages/` is the **legacy
+> MVP prototype**. It predates the freeze and contradicts it in documented
+> ways ([`docs/ASSESSMENT.md`](docs/ASSESSMENT.md)). It is being replaced
+> phase by phase ([`docs/ROADMAP.md`](docs/ROADMAP.md)). **Do not deploy the
+> MVP's output.**
 
-- The first realized code backend is `python-stdlib-http` (chosen for
-  reproducibility and zero-dependency verification anywhere). The IR and plan
-  are language-agnostic; a native backend (e.g. Rust/axum) implements the same
-  contract without any specification change.
-- PostgreSQL is supported via a generated, parameterized adapter; verification
-  uses a deterministic in-memory store.
-- Performance verification is an **indicative local latency benchmark**;
-  throughput targets are recorded but reported `UNVERIFIED` (SDC never claims a
-  target it did not measure). See [`docs/verification.md`](docs/verification.md).
+## Architecture documents
+
+| Document | Contents |
+|---|---|
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Final architecture, invariants, repository structure, critical design test |
+| [SPECIFICATION.md](docs/SPECIFICATION.md) | The Markdown source language `sdc/1` |
+| [SEMANTIC-IR.md](docs/SEMANTIC-IR.md) | IR v1: types, canonical form, `irVersion` |
+| [COMPILER.md](docs/COMPILER.md) | Pipeline stage contracts, profiles, CLI |
+| [ARTIFACT.md](docs/ARTIFACT.md) | Artifact and release bundle formats |
+| [RUNTIME.md](docs/RUNTIME.md) | Runtime contract and execution model |
+| [VERIFICATION.md](docs/VERIFICATION.md) | Obligations, evidence, release policy |
+| [SECURITY-MODEL.md](docs/SECURITY-MODEL.md) | Trust boundaries, threats, keys |
+| [BUILD-REPRODUCIBILITY.md](docs/BUILD-REPRODUCIBILITY.md) | What "reproducible" means |
+| [PROVENANCE.md](docs/PROVENANCE.md) | The signed provenance statement |
+| [SEMANTIC-DIFF.md](docs/SEMANTIC-DIFF.md) | Meaning-level diff and impact |
+| [AI-INTEGRATION.md](docs/AI-INTEGRATION.md) | The AI boundary |
+| [ADR/](docs/ADR/README.md) | Architecture decision records |
+
+## An SDC application (target model)
+
+```text
+my-application/
+├── sdc.toml             # toolchain configuration (never meaning)
+├── application.md       # Language: sdc/1, Name, Version
+├── api.md               # operations: ### GET /customers/{id} {#API-001}
+├── authentication.md    # scheme, claims table
+├── authorization.md     # roles and rules tables (default deny)
+├── data.md              # entities: field / type / key / tenant / sensitive
+├── behavior.md          # outcome → status table
+├── security.md          # requirements table with properties
+├── performance.md  reliability.md  observability.md
+├── deployment.md  testing.md  dependencies.md
+└── .sdc/ledger/         # record of AI-assisted edits (committed)
+```
+
+```bash
+sdc check            # parse, validate, resolve, analyze → diagnostics
+sdc compile          # → .build/artifact.json (artifactHash)
+sdc verify           # → evidence + release-policy decision
+sdc build            # → dist/<name>-<version>.release.json (signed)
+sdc run              # run a release through the verifying loader
+sdc diff R1 .        # semantic + effect diff with impact classification
+sdc explain SEC-002  # requirement lineage: source → IR → artifact → evidence
+```
+
+## Legacy MVP quickstart
+
+The prototype still runs, for reference only:
+
+```bash
+pip install -e ".[dev]"
+make test                         # 50 tests
+cd examples/customer-api && sdc build
+python scripts/assessment_probe.py   # reproduces the documented MVP defects
+```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Changes to frozen documents require an
+ADR.
 
 ## License
 
-Apache-2.0. [`LICENSE`](LICENSE).
+Apache-2.0. See [`LICENSE`](LICENSE).

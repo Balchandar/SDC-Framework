@@ -1,54 +1,29 @@
 # Security
 
-## Threat model for the compiler
+## Security model
 
-SDC treats the AI compiler layer as **untrusted or partially trusted**. The
-framework never lets model output become an executable artifact directly:
+SDC's trust boundaries, trusted computing base, threat model and key handling
+are specified in [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md). Runtime
+isolation is in [docs/RUNTIME.md](docs/RUNTIME.md).
 
-1. A provider produces a **structured implementation plan** (data), not code.
-2. The plan is **validated** against a schema before code generation.
-3. Generated code is executed **only** by the verifier, under confinement.
+## Status of the legacy MVP
 
-### Confinement of generated-code execution
+The code in `packages/` predates the architecture freeze and has **known
+security defects**, documented and reproducible in
+[docs/ASSESSMENT.md](docs/ASSESSMENT.md#3-verified-defects). Among them:
 
-The verifier runs the generated service in a subprocess that is:
+- tokens forged with an empty key are accepted when `SDC_JWT_SECRET` is
+  unset;
+- a missing role claim defaults to `user`;
+- artifacts are not integrity-checked before execution.
 
-- bound to **loopback only** (`127.0.0.1`, ephemeral port);
-- given a **fresh, random signing secret** per run (`SDC_JWT_SECRET`);
-- **never** passed production credentials (`DATABASE_URL` is stripped; the
-  in-memory store is forced);
-- **terminated** on teardown, with a kill fallback on timeout.
+**Do not deploy artifacts produced by the MVP.** Roadmap Phase 0 fixes the
+directly exploitable defects; the rest are removed by construction in the new
+architecture.
 
-Filesystem/network/CPU/memory isolation and execution timeouts are the intended
-sandbox surface; the MVP applies loopback binding, credential stripping,
-subprocess isolation and timeouts. Stronger OS-level sandboxing (cgroups,
-seccomp, containers) is a documented extension point.
+## Reporting a vulnerability
 
-## Security requirements as executable checks
-
-Security requirements in `security.md` become verification checks where a
-machine check exists (see `sdc_verifier/security.py`):
-
-- authentication enforcement, authorization enforcement, tenant isolation
-- secret exposure (responses), sensitive logging (logs)
-- SQL injection (parameterized queries; whitelisted identifiers)
-- unsafe deserialization, path traversal, SSRF
-- security headers, insecure configuration, forbidden dependencies
-
-A **mandatory** check that fails **fails the build** — no artifact is produced.
-Requirements with no automated check are reported `UNVERIFIED` (visible,
-non-blocking) rather than silently passed.
-
-## Properties of the generated artifact
-
-- Sensitive fields (marked in `data.md`) are stripped from all responses and
-  redacted from logs.
-- Secrets are read from the environment, never embedded.
-- Database access uses parameterized queries; table identifiers are validated
-  against a safe-identifier allowlist.
-- Every response carries baseline security headers.
-- Every authorization decision is logged (auditable).
-
-## Reporting
-
-This is a proof-of-concept. Please open an issue for security concerns.
+Please report suspected vulnerabilities privately through GitHub Security
+Advisories on this repository ("Report a vulnerability") rather than in a
+public issue. Include the SDC version, `compilerHash` / `runtimeHash` if
+available, and a minimal reproduction.
