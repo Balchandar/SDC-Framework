@@ -1,6 +1,8 @@
 # Semantic IR (irVersion 1.0)
 
-Status: **FROZEN — `irVersion` 1.0.** Governing ADR:
+Status: **FROZEN — `irVersion` 1.0**, amended before implementation by
+[ADR-0017](ADR/0017-policy-contract-and-capability-manifest.md) (`search`,
+classification, capabilities, derived policy view). Governing ADR:
 [ADR-0003](ADR/0003-semantic-ir-contract.md).
 
 The Semantic IR is SDC's truth model: the complete, typed meaning of a source
@@ -88,8 +90,11 @@ Application   { id: Id<APP>, name: string, version: SemVer }
 
 Api           { basePath: Defaultable<string>, operations: [Operation] }
 Operation     { id: Id<API>, method: "GET", path: PathTemplate,
-                kind: "read-one" | "read-list",
+                kind: "read-one" | "read-list" | "search",
                 resource: Ref<DATA>, keyParameter?: string,
+                criteria?: { mode: "at-least-one" | "all",
+                             params: [ { parameter, field: FieldName, match: "exact" | "prefix-ci" } ] },
+                maxResults?: int,
                 authentication: "required" | "none" }
 
 Authentication{ id?: Id<AUTHN>, scheme: "none" | "bearer-jwt",
@@ -100,15 +105,17 @@ Claim         { id: Id<AUTHN>, claim: string, mapsTo: PrincipalField, required: 
 Authorization { model: "none" | "rbac" | "rbac-tenant", default: "deny",
                 audit: bool, roles: [RoleName], rules: [Rule] }
 Rule          { id: Id<AUTHZ>, effect: "allow" | "deny",
-                role: RoleName | "any", action: "read" | "any",
+                role: RoleName | "any", action: "read" | "search" | "any",
                 resource: Ref<DATA> | "any", condition: Condition }
 Condition     = { kind: "always" } | { kind: "same-tenant" } | { kind: "cross-tenant" }
               | { kind: "attr-contains", principalAttr: string, field: FieldName }
 
-Data          { store: "sql" | "fixture", transactions: Defaultable<bool>, entities: [Entity] }
+Data          { store: "sql" | "fixture", storeDependency?: Ref<DEP>,
+                transactions: Defaultable<bool>, entities: [Entity] }
 Entity        { id: Id<DATA>, name: EntityName, fields: [Field] }   # fields sorted by name
 Field         { name: FieldName, type: "string" | "integer" | "boolean" | "timestamp",
-                key: bool, tenant: bool, sensitive: bool, nullable: bool }
+                key: bool, tenant: bool,
+                classification: "standard" | "personal" | "secret", nullable: bool }
 
 Behavior      { outcomes: [Outcome], deniedAs?: "forbidden" | "not-found" }
 Outcome       { id?: Id<BEH>, condition: OutcomeCondition, status: int,
@@ -137,9 +144,11 @@ TestCase      { id: Id<TEST>, operation: Ref<API>, principal: Principal,
                 target: { key: string, present: bool }, expect: OutcomeCondition,
                 verifies: [Ref<*>] }
 
-Dependencies  { dependencies: [Dependency] }
+Dependencies  { dependencies: [Dependency], capabilities: [CapabilityDecl] }
 Dependency    { id: Id<DEP>, kind: "runtime" | "store" | "identity-provider",
                 name: string, constraint: string }
+CapabilityDecl{ id: Id<DEP>, capability: CapabilityName,
+                target?: Ref<DEP>, access: "serve" | "read" | "emit" | "none" }
 
 Defaultable<T> = { value: T, origin: "source", id?: Id }
                | { value: T, origin: "default", rule: string }
@@ -194,7 +203,25 @@ Because nodes have stable ids, typed values and order-independent
 collections, the diff of two IRs is a structural comparison keyed by id with
 no heuristics. See [SEMANTIC-DIFF.md](SEMANTIC-DIFF.md).
 
-## 9. Relationship to the MVP IR
+## 9. Derived views: Policy Contract and capability manifest
+
+Two stable, typed views are defined over the IR as **pure functions**. They
+are contracts in their own right ([POLICY.md](POLICY.md)), but they are *not*
+additional sources of truth. They are never stored in `ir.json` and never
+contribute to `irHash`:
+
+| View | Function | Consumed by | Serialized as |
+|---|---|---|---|
+| SDC Policy Contract 1 | `policyView(ir)` over `authentication`, `authorization`, `data`, `behavior.deniedAs`, `observability`, `deployment`, `dependencies` | Planner (lowering); verifier (independent recomputation); Cedar oracle translation | `artifact.policy` (`policyHash`) |
+| Capability manifest 1 | `capabilityView(ir) = { granted: required(ir) ∩ declared(ir), denied: explicit none rows }` | Planner; verifier; host grant | `artifact.capabilities` (`capabilityHash`) |
+
+`required(ir)` is computed from the program: which operations exist, which
+stores they read, and whether logs or metrics are enabled. It is never taken
+from configuration. The planner and the verifier each implement these
+functions, and agreement between them is a static verification obligation
+([VERIFICATION.md §9](VERIFICATION.md#9-execution-substrate-verification)).
+
+## 10. Relationship to the MVP IR
 
 | MVP (`sdc_ir.model`) | IR 1.0 |
 |---|---|
@@ -204,6 +231,8 @@ no heuristics. See [SEMANTIC-DIFF.md](SEMANTIC-DIFF.md).
 | `AuthorizationRule.predicate: dict` | Closed `Condition` union |
 | `notes`, `description` in hashed IR | In `trace.json` only |
 | `SecurityRequirement.id` = heuristic check name | Declared `SEC-NNN` + closed `property` |
+| `Field.sensitive: bool` | `Field.classification: standard \| personal \| secret` |
+| No capabilities | `Dependencies.capabilities` + derived capability manifest |
 | `BehaviorRule(condition, status)` with invented defaults | `Outcome` with `origin` and default rule |
 | `TestCase.request: dict`, invented `tenant t1 / role user` | Typed `Principal`, declared fixtures, `verifies` links |
 | `Performance.p99_latency_ms`, `min_rps` | `PerfTarget` set with ids and criticality |

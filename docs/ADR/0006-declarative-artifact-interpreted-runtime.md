@@ -1,6 +1,7 @@
 # ADR-0006: No language backends; a declarative artifact interpreted by a fixed runtime
 
-- Status: Accepted
+- Status: Accepted. Amended by [ADR-0016](0016-wasm-execution-substrate.md): the
+  interpreter runs as a fixed Wasm component. The decision below is unchanged
 - Date: 2026-09-24
 
 ## Context
@@ -49,5 +50,10 @@ constants.
 - *Bytecode / VM*: introduces an instruction set, and therefore a language,
   for computation SDC does not need.
 - *WASM*: its purpose is isolating untrusted code, and there is none.
+  **Amended by ADR-0016:** this rejection stands for Wasm *as the artifact
+  format* (per-app generated code). It was incomplete as a rejection of Wasm
+  *as the substrate for the fixed interpreter*, because the interpreter
+  processes untrusted input and benefits from confinement. ADR-0016 adopts
+  that use.
 - *Native compilation*: the same problems as backends; performance is not the
   constraint at this vocabulary size.

@@ -1,6 +1,7 @@
 # Build Reproducibility
 
-Status: **FROZEN.** Governing ADR:
+Status: **FROZEN**, amended by [ADR-0016](ADR/0016-wasm-execution-substrate.md)
+(R5–R6 for the Wasm runtime; nothing weakened). Governing ADR:
 [ADR-0012](ADR/0012-reproducibility-definition.md).
 
 "Reproducible" in SDC is a set of precise, testable claims at defined levels.
@@ -55,6 +56,47 @@ mistaken for a released compiler.
 | **R2 Statement identity** | Same inputs ⇒ identical `statement.predicate.identity` object | **Mandatory** |
 | **R3 Verification outcome** | Same `artifactHash` + `runtimeHash` + `verifierHash` ⇒ identical status for every static and dynamic obligation | **Mandatory** for static and dynamic; measured obligations are exempt and marked `reproducible: false` |
 | **R4 Executable package** | Same release + same runtime package + same packaging recipe ⇒ byte-identical package | **Best effort** (§5) |
+| **R5 Engine component** | Same engine source + same pinned toolchain (Rust version, `Cargo.lock`, `wit-bindgen`, `wasm-tools`) ⇒ **byte-identical `sdc-engine` component** (same `engineHash`) | **Mandatory for runtime releases.** Runtime CI builds twice and compares (experiment E2 gates this). A violation is a P0 runtime-release defect |
+| **R6 Host binary** | Same host source + toolchain + target ⇒ identical `hostHash` | **Best effort.** Native linking differs by platform; `hostHash` is recorded per platform, and trust never depends on host reproducibility |
+
+### 3.1 The Wasm substrate does not weaken R1
+
+Under ADR-0016, **no Wasm is produced per application** (INV-26). The
+compiler still emits only the canonical artifact, so R0–R2 are *unchanged* by
+the substrate decision. The only Wasm binary is the engine, which is built
+once per runtime release and covered by R5. That is why Wasm adoption can
+keep the byte-identical artifact invariant without exception: a Wasm build
+toolchain never sits in the path from source to artifact.
+
+### 3.2 What is byte-identical, semantically identical, signed, canonical
+
+| Object | Byte-identical across rebuilds? | Semantically identical? | Signed? | Canonical form? |
+|---|---|---|---|---|
+| `ir.json`, `trace.json` | Yes (R0) | Yes | Via hashes in the statement | JCS subset |
+| Artifact (incl. `policy`, `capabilities`) | **Yes (R1)** | Yes | Via `artifactHash`, `policyHash`, `capabilityHash` | JCS subset |
+| Statement `identity` | **Yes (R2)** | Yes | Yes (payload) | JCS subset |
+| Statement `metadata` | No (describes the event) | — | Yes (payload) | JCS subset |
+| Evidence (static + dynamic only) | Yes, per obligation status (R3) | Yes | Via `verificationId` | JCS subset |
+| Evidence (with measured) | No | Statuses yes | Via `verificationId` | JCS subset |
+| `sdc-engine` component | **Yes (R5)** | Yes | Via `engineHash` in the statement | Wasm binary (no canonicalization; exact bytes) |
+| Host binary | Best effort (R6) | Conformance-equivalent | Via `hostHash` | — |
+| Precompiled engine code (`.cwasm`) | **Not an identity, never signed** | Yes (it is a cache) | No | — |
+| Container image | Best effort (R4) | Yes | Optionally, as a packaging attestation | — |
+
+### 3.3 Reproducibility failures
+
+Each of the following is a reproducibility failure:
+
+- `artifactHash` differs for identical build inputs. **P0 compiler defect.**
+- `engineHash` differs for an identical engine source and toolchain. **P0
+  runtime-release defect.**
+- The statement `identity` differs for identical inputs.
+- A static or dynamic obligation status differs for identical (`artifactHash`,
+  `runtimeHash`, `verifierHash`), including across Tier 1 platforms under
+  `runtime-match: engine` (experiment E6).
+
+These are **not** failures: a differing `hostHash` across platforms, a
+differing `.cwasm`, differing measured values, or differing container digests.
 
 **The SDC definition of "reproducible build":** R0, R1, R2 and R3 hold. In
 particular, anyone with the source set, the recorded compiler and the lock can
@@ -104,8 +146,12 @@ Registries may recompress layers, so R4 is best effort. The **canonical
 executable identity** is therefore defined independently of packaging:
 
 ```text
-executableId = sha256(JCS({ runtime: runtimeHash, artifact: artifactHash }))
+executableId = sha256(JCS({ host: hostHash, engine: engineHash, artifact: artifactHash }))
 ```
+
+`engineHash` is part of `executableId` because the engine is the only code
+that interprets the artifact. The Wasmtime version and host configuration are
+part of `hostHash` (they are compiled into the host binary).
 
 The runtime logs `executableId` at startup. Two deployments with the same
 `executableId` execute the same program on the same runtime, whatever their
@@ -121,8 +167,9 @@ image digest.
    input differs.
 3. Recompiles, then compares `irHash`, `traceHash`, `artifactHash` and the
    identity object byte for byte.
-4. Optionally (`--with-verification`) re-runs verification and compares the
-   R3 statuses.
+4. Optionally (`--with-verification`) re-runs verification on the runtime
+   named in the statement (`engineHash`, and `hostHash` where available) and
+   compares the R3 statuses.
 
 Output: `REPRODUCED` or `NOT_REPRODUCED` with the first differing field. CI
 runs this against every release candidate.

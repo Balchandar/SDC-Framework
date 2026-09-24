@@ -1,6 +1,9 @@
 # Provenance
 
-Status: **FROZEN — statement predicate `sdc.provenance/1`.** Governing ADRs:
+Status: **FROZEN — statement predicate `sdc.provenance/1`**, amended by
+[ADR-0016](ADR/0016-wasm-execution-substrate.md) and
+[ADR-0017](ADR/0017-policy-contract-and-capability-manifest.md) (policy,
+capability and engine identities). Governing ADRs:
 [ADR-0008](ADR/0008-detached-attestations-release-bundle.md),
 [ADR-0012](ADR/0012-reproducibility-definition.md).
 
@@ -29,6 +32,8 @@ supply-chain tooling can read it. The SDC predicate carries the details.
       "irHash":         "sha256:…",
       "traceHash":      "sha256:…",
       "artifactHash":   "sha256:…",
+      "policyHash":     "sha256:…",
+      "capabilityHash": "sha256:…",
       "irVersion":      "1.0",
       "languageVersion":"sdc/1",
       "compiler":       { "name": "sdc", "version": "1.0.0", "hash": "sha256:…" },
@@ -36,14 +41,17 @@ supply-chain tooling can read it. The SDC predicate carries the details.
       "lockHash":       "sha256:…",
       "dependencyHash": "sha256:…",
       "runtimeContract": 1,
-      "targetRuntime":  { "version": "1.0.0", "hash": "sha256:…" },
+      "targetRuntime":  { "version": "1.0.0", "hash": "sha256:…",
+                          "engine": "sha256:…", "host": "sha256:…", "wasmtime": "…" },
       "profile":        "release",
       "sources": [ { "path": "security.md", "sha256": "…" } ]
     },
     "verification": {
       "verificationId": "sha256:…",
       "verifier":       { "version": "1.0.0", "hash": "sha256:…" },
-      "runtime":        { "version": "1.0.0", "hash": "sha256:…" },
+      "runtime":        { "version": "1.0.0", "hash": "sha256:…",
+                          "engine": "sha256:…", "host": "sha256:…", "wasmtime": "…",
+                          "conformance": "sha256:…" },
       "decision":       "RELEASABLE",
       "blocking":       [],
       "waivers":        [],
@@ -78,9 +86,10 @@ supply-chain tooling can read it. The SDC predicate carries the details.
 | `artifactHash` | Also the statement subject. This is what the signature ultimately vouches for |
 | `compiler.hash` | `compilerHash` ([BUILD-REPRODUCIBILITY.md §2](BUILD-REPRODUCIBILITY.md#2-compiler-identity)) |
 | `dependencyHash` | Equals `lockHash` in v1. It is kept as a separate name so that a future lock format can hash only its dependency section |
-| `targetRuntime` | The runtime the lock pins, which is the one verification used |
+| `targetRuntime` | The runtime the lock pins, which is the one verification used: `engine` = `engineHash` of the `sdc-engine` component; `host` = `hostHash`; `wasmtime` = the Wasmtime version compiled into the host |
+| `policyHash`, `capabilityHash` | Sub-hashes of the artifact's `policy` and `capabilities` sections, so an audit can see exactly which policy and grants were signed |
 | `verification.verificationId` | `evidenceHash`, which binds the embedded evidence |
-| `verification.runtime` | The runtime evidence was **actually** produced on |
+| `verification.runtime` | The runtime evidence was **actually** produced on, including `engine`, `host` and the cited conformance evidence (`conformance`) |
 | `ai.entries` | AI proposals from the ledger that touched the current sources |
 | `ai.unattributedChanges` | Critical-section changes since the base release that have no ledger entry (when `require-attribution` is configured) |
 | `metadata` | The event record. Not reproducible, and never used for trust |
@@ -112,3 +121,22 @@ Given a running process:
    proves the path from source to artifact.
 5. `verification` shows the evidence, and `ai` shows any machine-authored
    input.
+
+## 6. Proving the executable's lineage
+
+With the fields above, the runtime and any auditor can prove the chain the
+architecture requires:
+
+| Claim | Proof |
+|---|---|
+| This Wasm engine is the one that was verified | `H(engine bytes) == targetRuntime.engine == verification.runtime.engine`, and the engine is in the trust-config allowlist |
+| …and it executed this SDC artifact | `H(artifact) == subject.digest`, recomputed at load |
+| …which came from this Semantic IR | `artifact.irHash == identity.irHash == H(materials.ir)` |
+| …which came from this source | `identity.sourceHash`, `identity.sources[]`, and reproducible recompilation (`sdc build --reproduce`) |
+| …and was produced by this compiler | `identity.compiler.hash` (`compilerHash`), checked by reproduction |
+| …under this policy and these grants | `identity.policyHash`, `identity.capabilityHash`, which equal the sub-hashes of the artifact |
+
+Note that the engine is **not** derived from the artifact. It is runtime
+code, bound to the artifact by the signed statement and the evidence. This is
+the explicit relationship that replaces the (rejected) idea of a per-app Wasm
+binary with its own identity.

@@ -1,7 +1,10 @@
 # SDC Architecture (Frozen)
 
-Status: **FROZEN — architecture v1.** Changing anything in this document
-requires a superseding ADR ([ADR-0001](ADR/0001-record-architecture-decisions.md)).
+Status: **FROZEN — architecture v1**, amended 2026-09-24 by
+[ADR-0016](ADR/0016-wasm-execution-substrate.md) (Wasm execution substrate)
+and [ADR-0017](ADR/0017-policy-contract-and-capability-manifest.md) (policy
+contract, capability manifest). Changing anything in this document requires a
+superseding ADR ([ADR-0001](ADR/0001-record-architecture-decisions.md)).
 
 > Humans and LLMs describe what the software means. SDC determines how that
 > meaning becomes executable. The compiler, not the LLM, is the authority.
@@ -26,7 +29,10 @@ SDC is **not**:
 
 There is no generated source code anywhere in SDC. The artifact is a
 declarative program in a closed, versioned vocabulary. The runtime is its
-interpreter.
+interpreter. The interpreter is a fixed WebAssembly component (`sdc-engine`)
+running on Wasmtime inside a host that owns every capability. **SDC defines
+the semantics; Wasm is only the execution substrate.** SDC never generates
+Wasm per application.
 
 ## 2. The six things that must never be confused
 
@@ -37,7 +43,7 @@ interpreter.
 | **Artifact** | The compiled program: one canonical JSON document | **Never** | `artifactHash` |
 | **Build** | One execution of the toolchain turning a source set into a release under a specific compiler, configuration and lock | — | `buildId` (deterministic), `invocationId` (per run) |
 | **Release** | The artifact plus its materials (IR, trace), evidence, provenance statement and signatures, in one bundle | **Never** | `releaseDigest` |
-| **Executable** | A runtime process (or package) that executes one release | — | `executableId` = H(runtimeHash, artifactHash); `executableHash` if packaged |
+| **Executable** | A runtime process (host + `sdc-engine` component) that executes one release | — | `executableId` = H(hostHash, engineHash, artifactHash); `executableHash` if packaged |
 
 "Build" is a process and has no bytes of its own. Everything with bytes has a
 hash.
@@ -74,9 +80,12 @@ hash.
              RELEASE BUNDLE  ── releaseDigest
  ═══════════════════ │ ══════════════ TRUST BOUNDARY: runtime TCB ══════
                      ▼
-   Runtime loader: signature → hashes → compatibility → policy
+   Host loader: signature → hashes (artifact, engine) → compatibility → policy
                      ▼
-   Interpreter executes the artifact through declared capabilities only
+   Host: authentication, policy decision point, capability grants
+                     ▼   (only granted sdc:runtime interfaces are linked)
+   Wasmtime ─► sdc-engine component interprets the artifact
+               (no filesystem, sockets, env, or secrets: INV-27, INV-29)
 ```
 
 ## 4. Pipeline
@@ -117,8 +126,14 @@ lockHash    ┘                                              ▼
                                                            ▼
                                                DSSE signature(s) ─► Release (releaseDigest)
                                                            ▼
-                                         executableId = H(runtimeHash, artifactHash)
+                                         executableId = H(hostHash, engineHash, artifactHash)
 ```
+
+`artifactHash` covers the policy section (`policyHash`) and the capability
+manifest (`capabilityHash`), so modifying either invalidates the artifact. The
+engine component is runtime code shared by all applications. Its
+`engineHash`, together with `hostHash`, is bound to the artifact only through
+the signed statement and the evidence ([WASM-EVALUATION.md §4](WASM-EVALUATION.md#4-artifact-model)).
 
 - The artifact embeds `irHash` but **not** `sourceHash`. A whitespace or
   comment edit changes `sourceHash` and `traceHash`, but not the artifact, so
@@ -130,19 +145,31 @@ lockHash    ┘                                              ▼
 ## 6. Execution model
 
 The compiler owns the execution model. The artifact is a **declarative
-program** made of operations (`read.one`, `read.list`, …), a policy (roles,
-rules, default deny), entity schemas, outcome mappings, limits and
+program** made of operations (`read-one`, `read-list`, `search`), the **SDC
+Policy Contract** (authentication, authorization, data access, audit, network
+and capability policy), entity schemas, outcome mappings, limits and
 observability requirements. Each element carries the requirement ids it was
-derived from. The runtime is a fixed interpreter that implements a versioned
-*runtime contract* and a set of versioned *capabilities* (`http.server/1`,
-`authn.jwt/1`, `authz.policy/1`, `store.sql/1`, …).
+derived from.
 
-There are no language backends. The reference runtime is written in Python.
-That is an implementation detail, and a second runtime is only another
-implementation of the same contract that must pass the conformance suite
-([ADR-0006](ADR/0006-declarative-artifact-interpreted-runtime.md),
-[ADR-0014](ADR/0014-implementation-language-and-packaging.md)).
-Details: [RUNTIME.md](RUNTIME.md).
+The runtime implements a versioned *runtime contract*. It has two parts:
+
+- the **host**: native code embedding Wasmtime. It is the security kernel:
+  loader, trust, authentication, secrets, policy decision point, data-access
+  scoping, log validation, and every capability;
+- the **`sdc-engine` component**: a fixed Wasm component that interprets the
+  artifact's vocabulary and imports only the SDC-owned WIT world
+  `sdc:runtime@1.0.0`.
+
+Authorization (who may do what) and capability security (what the program may
+do at all) are compiled separately and enforced by the host
+([POLICY.md](POLICY.md)).
+
+There are no language backends and no per-app Wasm. The Python runtime of the
+v1 freeze is the interim reference until the Wasm runtime passes the
+identical conformance suite ([RUNTIME-CONFORMANCE.md](RUNTIME-CONFORMANCE.md)).
+Decisions: [ADR-0006](ADR/0006-declarative-artifact-interpreted-runtime.md),
+[ADR-0016](ADR/0016-wasm-execution-substrate.md). Details:
+[RUNTIME.md](RUNTIME.md).
 
 ## 7. Trust model (summary)
 
@@ -151,9 +178,10 @@ Details: [RUNTIME.md](RUNTIME.md).
 | Compiler (stages 1–9) | Source files, *including human-authored ones* |
 | Verifier + release-policy evaluator | LLMs, AI proposals, prompts |
 | Signer + signing keys | External dependencies and services |
-| Runtime (loader, interpreter, capabilities) | Any artifact **before** its signature and hashes verify |
-| Runtime trust configuration (trusted keys) | Runtime inputs (requests, tokens, environment except secret values) |
-| | `.build/` cache contents; anything in a working directory |
+| Runtime host (loader, authentication, PDP, capabilities) | Any artifact **before** its signature and hashes verify |
+| Wasmtime + Cranelift (pinned LTS) | Runtime inputs (requests, tokens, environment except secret values) |
+| `sdc-engine` component: trusted for *correctness*, **not** for authority (confined to granted imports) | `.build/` cache contents; anything in a working directory |
+| Runtime trust configuration (trusted keys, engine allowlist, capability ceiling) | Agent integrations and MCP clients; precompiled code not produced by this host |
 
 Details: [SECURITY-MODEL.md](SECURITY-MODEL.md).
 
@@ -258,6 +286,29 @@ automated test (see [ROADMAP.md](ROADMAP.md)).
   profile, keys, waivers and AI policy only. Source-set membership is fixed by
   the language specification.
 
+**Execution substrate** (added by ADR-0016 and ADR-0017)
+
+- **INV-26** No executable code is produced per application. Every
+  application on a given runtime release runs the same `sdc-engine`
+  component. The per-application content is only the canonical artifact.
+- **INV-27** The engine component's imports are exactly the `sdc:runtime`
+  world. It imports no WASI filesystem, sockets, CLI, environment or process
+  interface, and the host linker defines nothing else. This is checked
+  statically from the component binary.
+- **INV-28** Every effect the program performs uses a capability that is
+  declared in source, validated by the compiler (`required ⊆ declared`),
+  listed in the artifact capability manifest, and granted by the host.
+  Anything else is absent or denied.
+- **INV-29** Security enforcement (authentication, secrets, policy decisions,
+  data-access scoping, `secret`-field removal, log validation) happens in the
+  host. The engine holds no secrets and reaches data only through a
+  host-issued, policy-scoped decision handle.
+- **INV-30** Precompiled native code is never an identity, never
+  distributed, and is loaded only from a host-private cache that the same
+  host build and configuration produced.
+- **INV-31** A runtime implementation replaces another only after passing the
+  identical conformance suite and differential parity on every example.
+
 ---
 
 ## 10. Final repository structure
@@ -268,26 +319,26 @@ without a big-bang move.
 ```text
 SDC-Framework/
 ├── README.md  LICENSE  CHANGELOG.md  CONTRIBUTING.md  SECURITY.md  CODE_OF_CONDUCT.md
-├── pyproject.toml                 # two distributions: sdc (toolchain), sdc-runtime
+├── pyproject.toml                 # toolchain distribution (sdc) + interim Python runtime
 ├── Makefile
 ├── docs/
 │   ├── ARCHITECTURE.md  SPECIFICATION.md  SEMANTIC-IR.md  COMPILER.md
 │   ├── ARTIFACT.md  RUNTIME.md  VERIFICATION.md  SECURITY-MODEL.md
 │   ├── BUILD-REPRODUCIBILITY.md  PROVENANCE.md  SEMANTIC-DIFF.md  AI-INTEGRATION.md
+│   ├── POLICY.md  RUNTIME-CONFORMANCE.md  WASM-EVALUATION.md
 │   ├── ASSESSMENT.md  ROADMAP.md
 │   └── ADR/
 ├── schemas/                       # JSON Schema; the machine-checkable contracts
 │   ├── ir/  artifact/  evidence/  provenance/  release/
 │   ├── proposal/  ledger/  configuration/
+├── runtime/                       # production runtime (Rust) — MUST NOT depend on the toolchain
+│   ├── wit/                       # sdc:runtime@1.0.0 WIT world (the runtime contract as types)
+│   ├── host/                      # Wasmtime embedding: loader, trust, authn, PDP, capabilities, store adapters
+│   ├── engine/                    # sdc-engine: vocabulary interpreter → Wasm component (no WASI imports)
+│   └── vectors/                   # canonical-form + hash test vectors shared with the Python contract
 ├── src/
-│   ├── sdc_runtime/               # distribution "sdc-runtime" — MUST NOT import sdc
-│   │   ├── contract/              # canonical JSON, hashing, artifact/release models, DSSE verify
-│   │   ├── loader/                # load → signature → hashes → compatibility → policy
-│   │   ├── interpreter/           # executes artifact operations
-│   │   ├── capabilities/          # http, store (fixture, sql), log, metrics, clock, secrets
-│   │   ├── security/              # authn (jwt), authz evaluator, redaction
-│   │   ├── sandbox/               # in-process limits; OS sandbox profile generation
-│   │   └── __main__.py            # `sdc-runtime run|verify|inspect`
+│   ├── sdc_contract/              # canonical JSON, hashing, artifact/release models, DSSE (toolchain side)
+│   ├── sdc_runtime/               # INTERIM Python reference runtime; removed from production at switch-over
 │   └── sdc/                       # distribution "sdc" — the toolchain
 │       ├── ir/                    # Semantic IR types, canonicalization, migrations
 │       ├── compiler/
@@ -302,24 +353,27 @@ SDC-Framework/
 │       │   ├── providers/  prompts/  proposals/  render/  ledger/
 │       └── cli/                   # init check compile build verify run diff inspect explain assist
 ├── tests/
-│   ├── parser/ semantic/ analysis/ planner/ artifact/ runtime/ conformance/
+│   ├── parser/ semantic/ analysis/ planner/ artifact/ runtime/
+│   ├── conformance/               # runtime-agnostic suite (RUNTIME-CONFORMANCE.md) + hostile components
 │   ├── verification/ security/ reproducibility/ semantic_diff/ explain/ ai/
 │   ├── end_to_end/
 │   └── golden/                    # source → IR → artifact golden files
 ├── examples/
 │   ├── hello-world/  crud-api/  secure-api/  healthcare/
+├── experiments/                   # isolated PoCs (E1–E6); never production architecture
 ├── tools/  scripts/
-└── .github/workflows/             # test, double-build reproducibility, conformance
+└── .github/workflows/             # test, double-build (artifact R1, engine R5), conformance
 ```
 
 ### Deliberate deviations from the requested layout
 
 | Requested | Decision | Reason |
 |---|---|---|
-| Top-level `compiler/`, `runtime/`, `verification/`, `ai/`, `cli/` | Under `src/sdc/…` and `src/sdc_runtime/…` | Top-level import names like `runtime` or `compiler` collide with other packages. The runtime must be installable **without** the toolchain (INV-20). |
+| Top-level `compiler/`, `verification/`, `ai/`, `cli/` | Under `src/sdc/…` | Top-level Python import names like `compiler` collide with other packages. The production runtime is a separate Rust tree, `runtime/`, installable **without** the toolchain (INV-20). |
 | `compiler/codegen/` | `compiler/emit/` | There is no code generation. Emit means canonical serialization of the artifact. |
 | `compiler/optimizer/` | An optional pass slot in `compiler/planner/` | v1 has no optimizations. Adding a stage because compilers usually have one is explicitly rejected. |
-| `compiler/artifact/` | `sdc_runtime/contract/` | The artifact model is shared by the compiler, verifier and runtime, so it belongs to the lowest layer. |
+| `compiler/artifact/` | `sdc_contract/` (Python) + `runtime/vectors/` | The artifact model is shared by the compiler, verifier and runtime. The Rust host has its own implementation, checked against shared vectors. |
+| `runtime/{loader,verifier,executor,sandbox,io,security}` + `runtime.py` | `runtime/{wit,host,engine}` | Under ADR-0016 the executor is the `sdc-engine` Wasm component; the sandbox is Wasmtime; the loader, security and io are the host. |
 | `compiler/build/` | `sdc/build/` | A build orchestrates compilation, verification and signing. It is not a compiler stage. |
 | `compiler/diff/` | `sdc/diff/` | The diff also compares releases and artifacts, not only sources. |
 | `runtime/verifier/` | `sdc_runtime/loader/` | This avoids confusion with `verification/`. Loading *is* verification of integrity. |
@@ -353,8 +407,13 @@ modifies `security.md`, the developer builds R2, and it is deployed.
 | What compiler produced it? | `compiler.version` + `compilerHash` (the hashes of the toolchain files, Python and Unicode versions) | [PROVENANCE.md](PROVENANCE.md) |
 | What verification was performed? | Evidence `verificationId`: every obligation with its method, status and runtime/verifier identity, plus the policy decision | [VERIFICATION.md](VERIFICATION.md) |
 | Can the artifact be trusted? | `sdc inspect --verify R2` or the runtime loader checks the signature by a trusted key, every hash, and that the policy decision is `RELEASABLE` | [SECURITY-MODEL.md](SECURITY-MODEL.md) |
-| Can the executable be reproduced? | `sdc build --reproduce R2` recompiles from the source set with the recorded compiler, configuration and lock, and requires a byte-identical artifact and identical statement identity. The executable identity is `H(runtimeHash, artifactHash)`. | [BUILD-REPRODUCIBILITY.md](BUILD-REPRODUCIBILITY.md) |
+| Can the executable be reproduced? | `sdc build --reproduce R2` recompiles from the source set with the recorded compiler, configuration and lock, and requires a byte-identical artifact and identical statement identity. The executable identity is `H(hostHash, engineHash, artifactHash)`. | [BUILD-REPRODUCIBILITY.md](BUILD-REPRODUCIBILITY.md) |
 | Can the runtime prove the artifact was not modified? | Yes, for the artifact and release. The loader re-canonicalizes, re-hashes and verifies the signature before executing, and refuses on any mismatch. **Limit:** SDC cannot prove the integrity of the runtime binary or host it runs on. That requires platform attestation, which is out of scope ([ROADMAP.md](ROADMAP.md#risks-and-unresolved-decisions)). | [RUNTIME.md](RUNTIME.md#3-loading-and-verification) |
+
+The execution-substrate design test (patient search: clinician-only
+authorization, a declared DB capability, a denied filesystem, a tampered
+engine or policy, an unverified security requirement) is worked in
+[POLICY.md §7](POLICY.md#7-critical-design-test-patient-search).
 
 All thirteen questions have a mechanism. Two have explicitly documented limits
 (attribution of edits made outside SDC, and host integrity). Both are
@@ -377,6 +436,9 @@ reported rather than hidden, so the architecture is considered **frozen**.
 | [PROVENANCE.md](PROVENANCE.md) | Statement format and fields |
 | [SEMANTIC-DIFF.md](SEMANTIC-DIFF.md) | Diff model, classes, impact |
 | [AI-INTEGRATION.md](AI-INTEGRATION.md) | AI boundary, proposal flow, provider policy, ledger |
+| [POLICY.md](POLICY.md) | SDC Policy Contract, capability model, `sdc:runtime` WIT world, OPA/Cedar decision |
+| [RUNTIME-CONFORMANCE.md](RUNTIME-CONFORMANCE.md) | Runtime conformance suite and the Python → Wasm switch-over gate |
+| [WASM-EVALUATION.md](WASM-EVALUATION.md) | Wasm substrate evaluation, decision, comparison, risks |
 | [ASSESSMENT.md](ASSESSMENT.md) | Current state, defects, contradictions, mapping |
 | [ROADMAP.md](ROADMAP.md) | Implementation phases, risks, unresolved decisions |
 | [ADR/](ADR/README.md) | Irreversible decisions |

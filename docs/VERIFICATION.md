@@ -1,6 +1,9 @@
 # Verification
 
-Status: **FROZEN — `sdc.evidence/1`.** Governing ADR:
+Status: **FROZEN — `sdc.evidence/1`**, amended before implementation by
+[ADR-0016](ADR/0016-wasm-execution-substrate.md) and
+[ADR-0017](ADR/0017-policy-contract-and-capability-manifest.md) (§9: the
+Wasm substrate, capabilities, and the Cedar oracle). Governing ADR:
 [ADR-0010](ADR/0010-verification-mandatory-for-release.md).
 
 Verification is a stage of the build, not an optional add-on. A release
@@ -54,10 +57,10 @@ Every requirement id in the IR yields at least one obligation, or an explicit
 | `API-*` | static: the operation exists with the declared method, path, kind and resource. dynamic: the route responds; a `read-one` on an absent key returns `notFound` |
 | `AUTHN-*` | static: `authn` matches. dynamic: no token, bad signature, expired token, wrong `alg`, missing required claim → `unauthenticated` |
 | `AUTHZ-*` rule | dynamic: one positive and one negative case per rule, derived from the permission matrix. static: the default is deny |
-| `DATA-*` | static: the projection excludes sensitive fields; the tenant field is present when tenant-scoped |
+| `DATA-*` | static: the projection excludes `secret` fields; `personal` fields are in `policy.audit.neverLogged`; the tenant field is present when tenant-scoped |
 | `BEH-*` | dynamic: each reachable condition yields its declared status |
-| `SEC-*` `no-sensitive-exposure` | static: no projection contains a sensitive field. dynamic: fixture sensitive values are absent from every response |
-| `SEC-*` `no-sensitive-logging` | dynamic: fixture sensitive values are absent from captured logs |
+| `SEC-*` `no-sensitive-exposure` | static: no projection contains a `secret` field. dynamic: fixture `secret` values are absent from every response |
+| `SEC-*` `no-sensitive-logging` | dynamic: fixture `personal` and `secret` values are absent from captured logs and metrics. trace: every `log.emit` used closed-vocabulary fields only |
 | `SEC-*` `tenant-isolation` | dynamic: every cross-tenant principal/target pair is denied, with no data leaked in the body |
 | `SEC-*` `authentication-enforced` / `authorization-enforced` | Composed of the AUTHN / AUTHZ obligations for every operation |
 | `SEC-*` `authorization-audit` | dynamic: every decision is logged with its rule ids |
@@ -69,7 +72,10 @@ Every requirement id in the IR yields at least one obligation, or an explicit
 | `REL-*` | dynamic: request size limit, timeout and concurrency limit enforced |
 | `OBS-*` | dynamic: declared fields present in the logs; `/metrics` and `/healthz` respond |
 | `TEST-*` | dynamic: the case, exactly as declared |
-| `APP-*`, `DEPL-*`, `DEP-*` | static: artifact header and inputs consistent; lock matches the runtime used |
+| `APP-*`, `DEPL-*`, `DEP-*` (dependencies) | static: artifact header and inputs consistent; lock matches the runtime used |
+| `DEP-*` capability grant | static: `artifact.capabilities.granted` equals `capabilityView(ir)`, recomputed by the verifier. trace: every call to the capability was scoped (store calls carry a decision), and no `capability.denied` event occurred |
+| `DEP-*` capability denial (`none`) | static: the engine component imports no interface that could provide it (INV-27). cited: the runtime conformance `CAP-DENY-*` result for this `runtimeHash` |
+| `AUTHZ-*` (all rules, together) | static (oracle): the verifier's own Cedar translation of the IR policy agrees with the runtime's decisions over the full permission matrix (§9.3) |
 
 The MVP's regex scans of generated Python source (SQL injection, `pickle`,
 `open(req…)`) are **removed**. There is no generated source to scan. The
@@ -119,7 +125,7 @@ Criticality comes from the source:
 
 | Criticality | Applies to |
 |---|---|
-| `critical` | All `SEC`, `AUTHN`, `AUTHZ`; `DATA` entities that have sensitive or tenant fields. Cannot be lowered |
+| `critical` | All `SEC`, `AUTHN`, `AUTHZ`; `DATA` entities that have `personal`, `secret` or tenant fields; every **capability** row in `dependencies.md`. Cannot be lowered |
 | `standard` | Everything else (the default) |
 | `advisory` | `PERF`, `OBS` only, when declared explicitly |
 
@@ -151,7 +157,9 @@ blocking requirement ids).
   "format": "sdc.evidence/1",
   "artifactHash": "sha256:…",
   "irHash": "sha256:…",
-  "runtime":  { "name": "sdc-runtime", "version": "1.0.0", "hash": "sha256:…" },
+  "runtime":  { "name": "sdc-runtime", "version": "1.0.0", "hash": "sha256:…",
+                "host": "sha256:…", "engine": "sha256:…", "wasmtime": "…",
+                "conformance": "sha256:…" },
   "verifier": { "version": "1.0.0", "hash": "sha256:…" },
   "profile": "release",
   "environment": { "platform": "linux-x86_64", "benchmarkProfile": "ci-perf-1" },
@@ -181,3 +189,56 @@ obligations affected by a change, for fast feedback in `sdc verify
 --changed`. **Releases never use selective verification.** A release always
 runs the full obligation set, or reuses complete evidence under the rule
 above. A defect in diff classification must never weaken a release.
+
+## 9. Execution-substrate verification
+
+Added by ADR-0016 and ADR-0017. The rule of §1 is unchanged: the verifier
+trusts neither the compiler nor the runtime's claims. The Wasm substrate adds
+things to inspect. It removes none of the earlier checks.
+
+### 9.1 What the verifier inspects, independently
+
+| Object | Check | Method |
+|---|---|---|
+| Artifact | As in §2, including the `policy` and `capabilities` sections, each recomputed from the IR by the verifier's own `policyView` and `capabilityView` | static |
+| Engine component | `engineHash` is in the trust-config engine allowlist; its import list is exactly the `sdc:runtime@1.0.0` world, with no WASI filesystem, sockets, CLI, environment or process interface; its export is exactly `handler` | static (parses the component binary; independent of the host) |
+| Runtime behavior | All dynamic obligations, executed by the real host + engine in verify mode | dynamic |
+| Capability use | The host **capability trace** (every capability call, with interface, decision id and result class) is asserted against the manifest and the policy: no ungranted call, no store call without a decision, log fields only from the vocabulary | dynamic (trace) |
+| Authorization | The permission matrix is exercised dynamically **and** cross-checked against the Cedar oracle (§9.3) | dynamic + static |
+| Security invariants of the host | Denial of unlinked imports, secret confinement, handle scoping, integrity refusals: established once per runtime release by the conformance suite, and **cited by `runtimeHash`** | cited evidence |
+
+### 9.2 Cited conformance evidence
+
+Some properties belong to the runtime, not to the application. Examples are
+"a component that imports `wasi:filesystem` cannot be instantiated" and "a
+tampered engine is refused". They are proved by
+[RUNTIME-CONFORMANCE.md](RUNTIME-CONFORMANCE.md) for a specific
+`runtimeHash`, and application evidence **cites** that result
+(`runtime.conformance`). A citation counts as `PASS` only if the cited
+conformance evidence exists, is signed by a trusted key, and matches the
+exact `runtimeHash` used for the dynamic obligations. Otherwise the obligation
+is `BLOCKED`. Because capability rows are critical, a `BLOCKED` citation blocks
+the release.
+
+### 9.3 Policy oracle (Cedar)
+
+The verifier translates the **IR**, not the artifact, into Cedar policies and
+a schema. That keeps it independent of the planner. It then:
+
+1. validates the Cedar policies against the schema;
+2. evaluates every (role, action, resource, condition-case) cell of the
+   permission matrix with Cedar and compares the results with the runtime's
+   observed decisions;
+3. where supported (experiment E5), proves symbolic properties such as "no
+   principal whose role is not in {R} is permitted action A on resource E".
+
+Any disagreement is `FAIL`. The oracle is a verification dependency. It is not
+part of the runtime TCB and is never executed at runtime.
+
+### 9.4 Differential verification during migration
+
+Until the Python → Wasm switch-over
+([RUNTIME-CONFORMANCE.md §5](RUNTIME-CONFORMANCE.md#5-switch-over-gate-python--wasm)),
+each example's release candidate is verified on **both** runtimes. Obligation
+statuses must be identical. A difference is `FAIL` for the Wasm runtime until
+it is explained and fixed.

@@ -1,6 +1,8 @@
 # ADR-0012: Reproducibility is defined as a byte-identical artifact from declared inputs
 
-- Status: Accepted
+- Status: Accepted. The `executableId` formula is refined by
+  [ADR-0016](0016-wasm-execution-substrate.md) to `H(hostHash, engineHash, artifactHash)`,
+  and R5/R6 are added. Nothing is weakened
 - Date: 2026-09-24
 
 ## Context

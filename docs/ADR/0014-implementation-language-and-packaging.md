@@ -1,6 +1,9 @@
 # ADR-0014: Python is the reference implementation; the runtime is separable; `cryptography` is allowed
 
-- Status: Accepted
+- Status: Accepted. The runtime-language clause is superseded by
+  [ADR-0016](0016-wasm-execution-substrate.md): the production runtime is a Rust
+  host plus a Wasm engine component, and the Python runtime is the interim
+  reference. The toolchain clauses are unchanged
 - Date: 2026-09-24
 
 ## Context

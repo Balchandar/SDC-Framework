@@ -1,6 +1,8 @@
 # Semantic Diff
 
-Status: **FROZEN — `sdc.diff/1`.** Governing ADR:
+Status: **FROZEN — `sdc.diff/1`**, extended by
+[ADR-0017](ADR/0017-policy-contract-and-capability-manifest.md) (capability
+and classification rules). Governing ADR:
 [ADR-0013](ADR/0013-semantic-diff-model.md).
 
 A Git text diff shows which characters changed. A semantic diff shows **which
@@ -29,7 +31,7 @@ the MVP's mutable `.build/application-ir.json` baseline is gone.
 | **Node diff** | IR nodes keyed by id | What the specification says differently |
 | **Effect diff** | Analysis facts: permission matrix, exposure map, authentication map, outcome map | What the system *does* differently, including indirect effects |
 
-Why both are needed: marking `email` as sensitive in `data.md` edits one
+Why both are needed: reclassifying `email` in `data.md` edits one
 `DATA` node, yet it changes the response of every operation on that entity.
 Renaming the role `user` to `clinician` edits the authorization table, and it
 changes who can call what. The effect diff makes such consequences explicit,
@@ -68,8 +70,6 @@ Classification rules (v1; versioned with `irVersion`):
 | Role renamed or replaced | `BREAKING` | `SECURITY_IMPACT`; Authorization: HIGH |
 | Authentication required → none on an operation | `NON_BREAKING` | `SECURITY_IMPACT`; Authentication: HIGH |
 | Authentication none → required | `BREAKING` | `SECURITY_IMPACT`; Authentication: MEDIUM |
-| Field sensitive yes → no (exposure widened) | `NON_BREAKING` | `SECURITY_IMPACT`; Data: HIGH |
-| Field sensitive no → yes (exposure narrowed) | `BREAKING` | `SECURITY_IMPACT`; Data: MEDIUM |
 | Field added | `NON_BREAKING` | `DATA_MIGRATION_REQUIRED` |
 | Field removed, or type/key/tenant changed | `BREAKING` | `DATA_MIGRATION_REQUIRED` |
 | Outcome status changed | `BREAKING` | API contract: HIGH |
@@ -80,6 +80,11 @@ Classification rules (v1; versioned with `irVersion`):
 | Performance target loosened | `NON_BREAKING` | `PERFORMANCE_IMPACT`; Performance: LOW |
 | Reliability limit changed | `POTENTIALLY_BREAKING` | Reliability: MEDIUM |
 | Test case added, removed or modified | `NON_BREAKING` | Verification: REQUIRED |
+| Capability grant added (e.g. a new `store` target) | `NON_BREAKING` | `SECURITY_IMPACT`; Capability: HIGH (privilege expansion) |
+| Capability grant removed, or `none` added | `POTENTIALLY_BREAKING` | `SECURITY_IMPACT`; Capability: MEDIUM |
+| Field classification lowered (`secret`→`personal`/`standard`, `personal`→`standard`) | `NON_BREAKING` | `SECURITY_IMPACT`; Data: HIGH (exposure or logging widened) |
+| Field classification raised | `BREAKING` (if it removes the field from responses) or `NON_BREAKING` | `SECURITY_IMPACT`; Data: MEDIUM |
+| Search criteria added, removed or match changed | `POTENTIALLY_BREAKING` | API contract: MEDIUM |
 
 The overall class is the maximum over all changes. The flags are the union.
 A change matching no rule is classified `POTENTIALLY_BREAKING` with a
@@ -89,7 +94,7 @@ diagnostic, so it is never silently `NON_BREAKING`.
 
 Each impact dimension gets a level `NONE` | `LOW` | `MEDIUM` | `HIGH`:
 Authentication, Authorization, API contract, Data, Security, Performance,
-Reliability, Observability.
+Reliability, Observability, Capability.
 
 Two further fields:
 

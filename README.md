@@ -11,6 +11,13 @@ compatible and verified.
 SDC is not an AI code generator, not a set of language backends, not a
 template engine and not a new programming language.
 
+**SDC defines the semantics. Wasm provides the execution substrate. The
+runtime host provides controlled capabilities. Policy defines authorization.
+Verification establishes evidence. Cryptographic provenance establishes
+identity.** A fixed `sdc-engine` WebAssembly component on Wasmtime interprets
+the signed artifact. SDC never generates code or Wasm per application
+([ADR-0016](docs/ADR/0016-wasm-execution-substrate.md)).
+
 ```text
              HUMAN / LLM
                   │
@@ -63,6 +70,9 @@ template engine and not a new programming language.
 | [PROVENANCE.md](docs/PROVENANCE.md) | The signed provenance statement |
 | [SEMANTIC-DIFF.md](docs/SEMANTIC-DIFF.md) | Meaning-level diff and impact |
 | [AI-INTEGRATION.md](docs/AI-INTEGRATION.md) | The AI boundary |
+| [POLICY.md](docs/POLICY.md) | Policy Contract, capability model, `sdc:runtime` WIT world |
+| [WASM-EVALUATION.md](docs/WASM-EVALUATION.md) | Why Wasm is the execution substrate, and on what conditions |
+| [RUNTIME-CONFORMANCE.md](docs/RUNTIME-CONFORMANCE.md) | The conformance suite every runtime must pass |
 | [ADR/](docs/ADR/README.md) | Architecture decision records |
 
 ## An SDC application (target model)

@@ -3,7 +3,15 @@
 Status: **FROZEN — language version `sdc/1`.** Governing ADRs:
 [ADR-0002](ADR/0002-markdown-controlled-grammar.md),
 [ADR-0004](ADR/0004-requirement-identifiers.md),
-[ADR-0005](ADR/0005-ambiguity-is-an-error.md).
+[ADR-0005](ADR/0005-ambiguity-is-an-error.md),
+[ADR-0017](ADR/0017-policy-contract-and-capability-manifest.md).
+
+> **Amendment (2026-09-24, ADR-0017, before any implementation).** sdc/1
+> gains: the `search` operation and action (§5.2, §5.4); data
+> `Classification` replacing `Sensitive` (§5.5); `Store-Dependency` (§5.5);
+> and the **Capabilities** table (§5.13). No sdc/1 document or compiler
+> existed before the amendment, so no meaning changed for any existing
+> source.
 
 SDC source is ordinary Markdown. A human or an LLM can read and write it
 without learning a programming language. Meaning, however, is carried only by
@@ -114,6 +122,9 @@ Authentication: required
 - The `{#ID}` suffix declares the requirement id.
 - The key–value lines directly under the heading, up to the next blank-line
   paragraph, table or heading, belong to the item.
+- A table that directly follows an item's key–value lines, before any other
+  heading, belongs to the item when the section grammar defines an item table
+  for it (for example the search **Criteria** table, §5.2).
 
 ### 3.4 The normative-prose rule
 
@@ -175,14 +186,26 @@ Items: `### <METHOD> <path-template> {#API-NNN}`
 
 | Key | R/O | Value |
 |---|---|---|
-| `Operation` | R | `read-one` \| `read-list` (sdc/1) |
+| `Operation` | R | `read-one` \| `read-list` \| `search` (sdc/1) |
 | `Resource` | R | an entity name declared in `data.md`. **Never inferred from the path.** |
 | `Authentication` | R | `required` \| `none` |
 | `Key-Parameter` | R for `read-one` | a path parameter name that maps to the resource key |
+| `Criteria` | R for `search` | `at-least-one` \| `all` (whether each request must supply at least one, or all, criteria parameters) |
+| `Max-Results` | R for `search` and `read-list` | integer, 1–1000 |
 | `Summary` | O | prose (trace) |
 
-The METHOD must be consistent with the operation: `read-*` ⇒ `GET`. Path
-parameters are `{name}` with `name` matching `[a-z][a-z0-9_]*`.
+Item table **Criteria** (required for `search`) — `| Parameter | Field | Match |`
+
+- `Parameter`: a query parameter name `[a-z][a-z0-9_]*`
+- `Field`: a field of the resource entity
+- `Match` ∈ `exact` \| `prefix-ci` (case-insensitive prefix)
+- The supplied criteria are combined with **AND**. Unknown query parameters
+  yield `invalid-request`.
+- A `search` operation without this table is `ERROR SDC-S031`. Prose such as
+  "search supports MRN and name" never defines search semantics.
+
+The METHOD must be consistent with the operation: `read-*` and `search` ⇒
+`GET`. Path parameters are `{name}` with `name` matching `[a-z][a-z0-9_]*`.
 
 ### 5.3 Authentication (`AUTHN`)
 
@@ -216,7 +239,7 @@ Table **Rules** — `| ID | Effect | Role | Action | Resource | Condition |`
 
 - `Effect` ∈ `allow` \| `deny`
 - `Role` is a declared role, or `any`
-- `Action` ∈ `read` \| `any`
+- `Action` ∈ `read` \| `search` \| `any` (`read-one` and `read-list` are `read`; `search` is `search`)
 - `Resource` is a declared entity, or `any`
 - `Condition` ∈ `always` \| `same-tenant` \| `cross-tenant` \|
   `attr-contains(<principal attr>, <entity field>)`
@@ -257,16 +280,22 @@ description.
 | Key | R/O | Value |
 |---|---|---|
 | `Store` | R | `sql` \| `fixture` (`fixture` is `WARNING` in release) |
+| `Store-Dependency` | R if `sql` | the `DEP-NNN` id of a `store` dependency (§5.13) |
 | `Transactions` | O | `required` \| `none` |
 
 Items: `### <EntityName> {#DATA-NNN}` followed by the table
-`| Field | Type | Key | Tenant | Sensitive | Nullable |`
+`| Field | Type | Key | Tenant | Classification | Nullable |`
 
 - `Type` ∈ `string` \| `integer` \| `boolean` \| `timestamp`
-- `Key`, `Tenant`, `Sensitive`, `Nullable` ∈ `yes` \| `no`, **all required**
+- `Key`, `Tenant`, `Nullable` ∈ `yes` \| `no`, **all required**
+- `Classification` ∈ `standard` \| `personal` \| `secret`, **required**
+  ([POLICY.md §2.2](POLICY.md#22-data-classification-amends-sdc1-sensitive)):
+  - `standard`: returned to authorized requests;
+  - `personal`: returned to authorized requests, **never logged**;
+  - `secret`: never returned, never logged, never passed to the engine.
 - Exactly one `Key: yes` per entity. At most one `Tenant: yes`.
 - A field whose name suggests a secret (`password`, `token`, `secret`, …)
-  but is marked `Sensitive: no` gets a `WARNING`. It is never silently
+  but is not classified `secret` gets a `WARNING`. It is never silently
   upgraded.
 
 ### 5.6 Behavior (`BEH`)
@@ -294,7 +323,8 @@ disclosure`.
 Table **Requirements** — `| ID | Requirement | Property | Criticality |`
 
 - `Requirement`: prose (trace).
-- `Property` ∈ `no-sensitive-exposure` \| `no-sensitive-logging` \|
+- `Property` ∈ `no-sensitive-exposure` (no `secret` field returned) \|
+  `no-sensitive-logging` (no `personal` or `secret` value logged) \|
   `tenant-isolation` \| `authentication-enforced` \| `authorization-enforced` \|
   `authorization-audit` \| `injection-safe` \| `security-headers` \|
   `secrets-from-runtime` \| `custom`
@@ -376,6 +406,23 @@ Table **Dependencies** — `| ID | Kind | Name | Constraint |`
 - In SDC, a dependency is an **external service or runtime capability
   provider**, never a code library. Artifacts cannot import code.
 - These are resolved into `sdc.lock` ([COMPILER.md](COMPILER.md#stage-6-resolve)).
+
+Table **Capabilities** — `| ID | Capability | Target | Access |`
+([POLICY.md §4](POLICY.md#4-capability-model))
+
+- `Capability` ∈ `http.inbound` \| `store` \| `log` \| `metrics` \|
+  `filesystem` \| `network.outbound` \| `process` \| `environment` \|
+  `clock` \| `random` \| `secrets`
+- `Access`: `serve` (`http.inbound`), `read` (`store`; `write` is reserved),
+  `emit` (`log`, `metrics`), or `none` (an explicit denial). Every capability
+  from `filesystem` onwards accepts **only `none`** in sdc/1. A grant is an
+  `ERROR`, because runtime contract 1 has no such capability.
+- `Target`: for `store`, the `Name` of a `store` dependency; otherwise `-` or
+  `any`.
+- Every capability the compiled program needs must be granted here, otherwise
+  `ERROR SDC-R030`. **Nothing is granted implicitly.** An unused grant is
+  `WARNING SDC-A030` and is not emitted.
+- Capability rows are always **critical** requirements.
 
 ## 6. Diagnostics
 

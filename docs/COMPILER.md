@@ -4,12 +4,17 @@ Status: **FROZEN.** Governing ADRs:
 [ADR-0003](ADR/0003-semantic-ir-contract.md),
 [ADR-0005](ADR/0005-ambiguity-is-an-error.md),
 [ADR-0006](ADR/0006-declarative-artifact-interpreted-runtime.md),
-[ADR-0011](ADR/0011-ai-outside-the-build.md).
+[ADR-0011](ADR/0011-ai-outside-the-build.md),
+[ADR-0016](ADR/0016-wasm-execution-substrate.md),
+[ADR-0017](ADR/0017-policy-contract-and-capability-manifest.md).
 
 The compiler is the trusted, deterministic component that turns a source set
 into an artifact. It never calls an AI provider, never touches the network,
 and never reads the clock, the environment or anything outside the source set
-and the lock file (INV-01, INV-10, INV-11).
+and the lock file (INV-01, INV-10, INV-11). **It never emits WebAssembly or
+source code in any language** (INV-26). The Wasm execution substrate
+(ADR-0016) does not change the compiler: its output is still exactly one
+canonical artifact.
 
 ---
 
@@ -103,11 +108,18 @@ Facts are derived and deterministic, and they are *not* part of `irHash`
   - an operation with no possible `allow` path (`WARNING SDC-A010 unreachable
     operation`);
   - a deny rule that makes an allow rule dead (`WARNING SDC-A011`);
-  - a sensitive field in the exposure map (`ERROR`, since no operation may
+  - a `secret` field in the exposure map (`ERROR`, since no operation may
     return one);
   - `Denied-As` absent under `rbac-tenant` (`WARNING SDC-A021`);
   - a `security.md` property whose preconditions are missing, e.g.
-    `tenant-isolation` without `rbac-tenant` (`ERROR`).
+    `tenant-isolation` without `rbac-tenant` (`ERROR`);
+  - a capability the program requires that is not declared in the
+    Capabilities table (`ERROR SDC-R030`), or a declared grant it does not use
+    (`WARNING SDC-A030`, which is not emitted);
+  - a grant of a capability that runtime contract 1 does not have
+    (`filesystem`, `network.outbound`, …) (`ERROR`);
+  - a `search` operation without a criteria table (`ERROR SDC-S031`), or a
+    criteria field that is `secret` (`ERROR`).
 - Analysis reports diagnostics only. It never modifies the IR.
 
 ### Stage 8: Plan
@@ -116,8 +128,12 @@ Facts are derived and deterministic, and they are *not* part of `irHash`
 
 - Lowering: one artifact operation per API operation, with its effective
   policy (the applicable rules pre-selected by resource and action), its
-  response projection (declared fields minus sensitive fields), its outcome
+  response projection (declared fields minus `secret` fields), its outcome
   map, its limits and its observability fields.
+- Serializes the **Policy Contract** (`policyView(ir)`) as `artifact.policy`
+  and the **capability manifest** (`capabilityView(ir)`) as
+  `artifact.capabilities` ([POLICY.md](POLICY.md)). Response projections
+  exclude `secret` fields.
 - Every artifact element records `derivedFrom: [requirement ids]`.
 - **Optimization slot.** This is an ordered list of passes that each preserve
   semantics. **It is empty in v1.** Adding a pass requires an ADR and a
@@ -201,7 +217,7 @@ error, `70` internal error.
 | `sdc compile` | 1–9 | `.build/artifact.json` and `artifactHash` |
 | `sdc verify` | 1–11 | `.build/evidence.json` and the policy decision (no signing) |
 | `sdc build [--profile dev\|release] [--reproduce <release>]` | 1–14 | `dist/<name>-<version>.release.json` |
-| `sdc run [<release>]` | runtime | Runs a release through the **production loader path**. With no argument, builds a `dev` release first and runs it with `--allow-dev`. A critical `FAIL` is refused even in dev. |
+| `sdc run [<release>]` | runtime | Runs a release through the **production loader path** of `sdc-runtime` (the Wasm host after switch-over; the Python reference runtime before it). With no argument, builds a `dev` release first and runs it with `--allow-dev`. A critical `FAIL` is refused even in dev. |
 | `sdc diff <base> [<head>]` | 1–7 on both | Semantic + effect diff. Each side is a project directory or a release bundle |
 | `sdc inspect <dir\|artifact\|release> [--verify] [--json]` | — | Human or JSON view. `--verify` checks a release chain offline |
 | `sdc explain <REQ-ID> [--release <r>]` | 1–7 (+ evidence) | Requirement lineage |

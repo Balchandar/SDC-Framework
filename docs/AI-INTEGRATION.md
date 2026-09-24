@@ -1,6 +1,7 @@
 # AI Integration
 
 Status: **FROZEN.** Governing ADR: [ADR-0011](ADR/0011-ai-outside-the-build.md).
+Confirmed unchanged by [ADR-0016](ADR/0016-wasm-execution-substrate.md) (§8).
 
 AI assists the *author*. It is not part of the compiler. The compiler, not the
 LLM, is the authority.
@@ -147,3 +148,18 @@ spans, never secrets and never files outside the source set.
 Everything except `sdc assist` works with no provider. `sdc assist
 --provider local` uses the deterministic local proposer. SDC is complete
 without AI; AI makes authoring faster.
+
+## 8. AI and the execution substrate
+
+The Wasm decision (ADR-0016) changes nothing about the AI boundary, and it
+adds two explicit rules:
+
+- **AI never produces executable output.** It produces no Wasm, no WIT and no
+  host code. Its only output is proposals rendered as Markdown patches. The
+  engine component is runtime code, written and reviewed by maintainers.
+- **Capability grants are security-critical source.** An AI proposal that adds
+  or widens a row in the Capabilities table, or lowers a field
+  classification, is flagged in the patch review. It is classified
+  `SECURITY_IMPACT` by `sdc diff`, and it is subject to the
+  `require-attribution` policy for `DEP` capability rows. Agent integrations
+  and MCP clients that drive `sdc assist` get no additional trust.

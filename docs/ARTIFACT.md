@@ -3,7 +3,17 @@
 Status: **FROZEN — `sdc.artifact/1`, `sdc.release/1`.** Governing ADRs:
 [ADR-0006](ADR/0006-declarative-artifact-interpreted-runtime.md),
 [ADR-0007](ADR/0007-artifact-canonical-json.md),
-[ADR-0008](ADR/0008-detached-attestations-release-bundle.md).
+[ADR-0008](ADR/0008-detached-attestations-release-bundle.md),
+[ADR-0016](ADR/0016-wasm-execution-substrate.md),
+[ADR-0017](ADR/0017-policy-contract-and-capability-manifest.md).
+
+> **Amendment (2026-09-24, before any implementation).** The artifact gains a
+> structured `policy` section (the SDC Policy Contract) that replaces the
+> separate `authn` / `authz` blocks, and a `capabilities` section (the
+> capability manifest). **The artifact stays the only semantic identity.**
+> The Wasm engine that executes it is runtime code, not part of the artifact,
+> and is bound to it through the signed statement
+> ([WASM-EVALUATION.md §4](WASM-EVALUATION.md#4-artifact-model)).
 
 ---
 
@@ -34,7 +44,8 @@ the document, it is not part of the artifact.
 
 ### 1.3 What the artifact must never contain (INV-08)
 
-Code in any language, secrets or secret values, fixtures or test data,
+Code in any language (**including WebAssembly**: no per-application Wasm
+exists, INV-26), secrets or secret values, fixtures or test data,
 timestamps, absolute paths, host or user names, environment values, prose or
 descriptions, `sourceHash`, `compilerHash`, or evidence.
 
@@ -61,32 +72,54 @@ exactly "the program changed".
     "requestTimeoutMs": 10000, "maxRequestBytes": 1048576, "maxConcurrency": 64,
     "shutdownGraceMs": 10000, "derivedFrom": ["REL-001"]
   },
-  "entities": [
-    { "id": "DATA-001", "name": "Customer", "key": "id", "tenant": "tenant_id",
-      "fields": [ { "name": "email", "type": "string", "sensitive": false, "nullable": false }, "…" ] }
-  ],
-  "authn": {
-    "scheme": "bearer-jwt", "algorithm": "HS256", "secret": "JWT_SIGNING_KEY",
-    "claims": [ { "claim": "role", "mapsTo": "principal.role", "required": true, "derivedFrom": ["AUTHN-003"] }, "…" ]
+  "policy": {
+    "version": 1,
+    "authentication": {
+      "scheme": "bearer-jwt", "algorithm": "HS256", "secret": "JWT_SIGNING_KEY",
+      "claims": [ { "claim": "role", "mapsTo": "principal.role", "required": true, "derivedFrom": ["AUTHN-003"] }, "…" ]
+    },
+    "authorization": {
+      "model": "rbac-tenant", "default": "deny", "deniedAs": "notFound",
+      "roles": ["tenant_admin", "user"],
+      "rules": [
+        { "id": "AUTHZ-001", "effect": "allow", "role": "user", "action": "read",
+          "resource": "DATA-001", "condition": { "kind": "same-tenant" } },
+        { "id": "AUTHZ-003", "effect": "deny", "role": "any", "action": "any",
+          "resource": "any", "condition": { "kind": "cross-tenant" } }
+      ]
+    },
+    "dataAccess": {
+      "entities": [
+        { "id": "DATA-001", "name": "Customer", "store": "DEP-001", "key": "id", "tenant": "tenant_id",
+          "fields": [ { "name": "email", "type": "string", "classification": "personal", "nullable": false },
+                      { "name": "password", "type": "string", "classification": "secret", "nullable": false }, "…" ] }
+      ],
+      "operations": [
+        { "id": "API-001", "entity": "DATA-001", "access": "get",
+          "projection": ["email", "id", "name", "tenant_id"] }
+      ]
+    },
+    "audit": { "decisions": "required", "fields": ["authz-decision", "latency", "operation", "requirement-id", "status"],
+               "neverLogged": ["personal", "secret"] },
+    "network": { "inbound": { "port": 8080 }, "outbound": [ { "dependency": "DEP-001", "purpose": "store" } ], "default": "deny" }
   },
-  "authz": {
-    "default": "deny", "audit": true, "roles": ["tenant_admin", "user"],
-    "rules": [
-      { "id": "AUTHZ-001", "effect": "allow", "role": "user", "action": "read",
-        "resource": "DATA-001", "condition": { "kind": "same-tenant" } },
-      { "id": "AUTHZ-003", "effect": "deny", "role": "any", "action": "any",
-        "resource": "any", "condition": { "kind": "cross-tenant" } }
-    ]
+  "capabilities": {
+    "granted": [
+      { "id": "DEP-010", "capability": "store", "target": "DEP-001", "access": "read", "entities": ["DATA-001"] },
+      { "id": "DEP-011", "capability": "http.inbound", "access": "serve" },
+      { "id": "DEP-012", "capability": "log", "access": "emit" },
+      { "id": "DEP-013", "capability": "metrics", "access": "emit" }
+    ],
+    "denied": [ { "id": "DEP-020", "capability": "filesystem" } ]
   },
   "outcomes": {
     "success": 200, "unauthenticated": 401, "forbidden": 403, "notFound": 404,
-    "invalidRequest": 400, "internalError": 500, "unavailable": 503, "deniedAs": "notFound"
+    "invalidRequest": 400, "internalError": 500, "unavailable": 503
   },
   "operations": [
     { "id": "API-001", "method": "GET", "path": "/customers/{id}", "kind": "read-one",
       "resource": "DATA-001", "keyParameter": "id", "authentication": "required",
       "rules": ["AUTHZ-001", "AUTHZ-002", "AUTHZ-003"],
-      "projection": ["email", "id", "name", "tenant_id"],
       "derivedFrom": ["API-001", "AUTHN-001", "AUTHZ-001", "AUTHZ-002", "AUTHZ-003", "BEH-001", "DATA-001", "SEC-001"] }
   ],
   "observability": {
@@ -101,14 +134,25 @@ exactly "the program changed".
 
 Notes:
 
-- `operations[].rules` is the pre-selected effective policy, and
-  `projection` is the response field set. The runtime needs no knowledge of
-  the IR.
+- `policy` is the serialized SDC Policy Contract
+  ([POLICY.md §2](POLICY.md#2-the-sdc-policy-contract)). Response projection
+  lives in `policy.dataAccess.operations[].projection` (`secret` fields are
+  never projected), and `operations[].rules` is the pre-selected effective
+  policy. The runtime needs no knowledge of the IR.
+- `capabilities` is the capability manifest
+  ([POLICY.md §4](POLICY.md#4-capability-model)): `granted` is exactly
+  `required ∩ declared`, and `denied` lists explicit denials for
+  documentation and verification.
 - `requires` lists runtime capabilities with major versions. Compatibility
   means the runtime implements every listed capability at that major version
-  and implements `runtimeContract`.
+  and implements `runtimeContract`. It says what the runtime must *implement*;
+  `capabilities.granted` says what this program may *use*.
 - `requirements` indexes every requirement id that has a runtime
   counterpart, which allows audit logs to cite requirement ids.
+- **Sub-hashes.** `policyHash = sha256(JCS(artifact.policy))` and
+  `capabilityHash = sha256(JCS(artifact.capabilities))`. They are recorded in
+  the statement for audit and diff. They are *parts* of `artifactHash`, not
+  independent identities.
 
 ### 1.5 Loader validation (before any execution)
 
@@ -143,14 +187,25 @@ The **release** is what gets deployed. It is one canonical JSON file named
 - `envelope` is a DSSE envelope. The signature is Ed25519 over
   `PAE(payloadType, payload)`.
 - The statement ([PROVENANCE.md](PROVENANCE.md)) binds `artifactHash`,
-  `irHash`, `traceHash`, `evidenceHash` and `sourceHash`. The runtime
-  recomputes each hash from the embedded documents and compares:
+  `irHash`, `traceHash`, `evidenceHash`, `sourceHash`, `policyHash`,
+  `capabilityHash`, `engineHash` and `hostHash`. The runtime recomputes each
+  hash from the embedded documents and from the engine component it is about
+  to instantiate, and compares:
   - `H(artifact) == statement.subject.digest`
   - `H(materials.ir) == identity.irHash == artifact.irHash`
   - `H(materials.trace) == identity.traceHash`
   - `H(evidence) == verification.verificationId`
+  - `H(artifact.policy) == identity.policyHash`, `H(artifact.capabilities) == identity.capabilityHash`
+  - `H(engine component bytes) == targetRuntime.engine` (and the engine is in the trust-config allowlist)
 - `releaseDigest = sha256(canonical release file)`. It identifies the bundle
   for distribution only; trust derives from the signature.
+- **The release does not contain the engine component by default.** The engine
+  is part of the runtime distribution, and the statement names it by hash.
+  For air-gapped deployment the bundle MAY carry the engine bytes under
+  `runtime.engine`; they are then checked exactly as above, and trust still
+  derives from the trust-config allowlist, never from the bundle.
+- **There is no separate "manifest" file.** The statement's `identity`
+  section is the release manifest, so the same facts are never stored twice.
 - The IR, trace and evidence travel with the release so that `sdc explain`,
   `sdc diff` and audits work on a deployed release without its source tree.
 
@@ -166,8 +221,11 @@ The **release** is what gets deployed. It is one canonical JSON file named
 | `compilerHash`, `configHash`, `lockHash`, `buildId` | Toolchain identity and inputs | [BUILD-REPRODUCIBILITY.md](BUILD-REPRODUCIBILITY.md) |
 | `statementHash` | The statement payload | [PROVENANCE.md](PROVENANCE.md) |
 | `releaseDigest` | The release file | here |
-| `runtimeHash` | The runtime distribution | [RUNTIME.md](RUNTIME.md) |
-| `executableId` | `H(JCS({runtime: runtimeHash, artifact: artifactHash}))` | [BUILD-REPRODUCIBILITY.md](BUILD-REPRODUCIBILITY.md) |
+| `policyHash`, `capabilityHash` | `artifact.policy`, `artifact.capabilities` (sub-hashes of the artifact) | here |
+| `engineHash` | The `sdc-engine` Wasm component bytes | [RUNTIME.md §1](RUNTIME.md#1-role) |
+| `hostHash` | The host binary (per platform) | [RUNTIME.md §1](RUNTIME.md#1-role) |
+| `runtimeHash` | `H({host, engine, wasmtime, hostConfig})` | [RUNTIME.md §1](RUNTIME.md#1-role) |
+| `executableId` | `H(JCS({host: hostHash, engine: engineHash, artifact: artifactHash}))` | [BUILD-REPRODUCIBILITY.md](BUILD-REPRODUCIBILITY.md) |
 
 ## 4. Format evolution
 

@@ -1,9 +1,17 @@
 # Runtime Contract
 
-Status: **FROZEN — runtime contract 1.** Governing ADRs:
+Status: **FROZEN — runtime contract 1**, amended before implementation by
+[ADR-0016](ADR/0016-wasm-execution-substrate.md) (Wasm substrate) and
+[ADR-0017](ADR/0017-policy-contract-and-capability-manifest.md) (policy
+contract, capability manifest). Governing ADRs:
 [ADR-0006](ADR/0006-declarative-artifact-interpreted-runtime.md),
 [ADR-0009](ADR/0009-runtime-executes-only-verified-releases.md),
-[ADR-0015](ADR/0015-capability-based-runtime.md).
+[ADR-0015](ADR/0015-capability-based-runtime.md). Conformance:
+[RUNTIME-CONFORMANCE.md](RUNTIME-CONFORMANCE.md).
+
+The amendment changed *how* the contract is implemented (§12, §13) and made
+the capability grant explicit (§6). It did not change the loader chain,
+modes, outcomes or fail-closed rules.
 
 The contract is frozen first. The execution technology is chosen from it in
 §12.
@@ -17,10 +25,25 @@ release is intact, compatible and permitted, and then interprets the artifact.
 It contains no application-specific code, and it does not depend on the
 toolchain (INV-20).
 
-The runtime ships as its own distribution (`sdc-runtime`). Its identity is
-`runtimeHash`: the sha256 of the canonical manifest of its installed files and
-their hashes, plus the interpreter version. That identity is recorded in
-evidence and in startup logs.
+The runtime ships as its own distribution (`sdc-runtime`). It has two parts:
+
+| Part | What it is | Identity |
+|---|---|---|
+| **Host** | A native binary (Rust) embedding Wasmtime: loader, trust, authentication, secrets, policy decision point, capability implementations, HTTP termination | `hostHash`: sha256 of the host binary for its platform |
+| **Engine** | The `sdc-engine` Wasm component: the interpreter of `sdc.artifact/1`, identical on all platforms | `engineHash`: sha256 of the component bytes |
+
+```text
+runtimeHash = sha256(JCS({ host: hostHash, engine: engineHash,
+                           wasmtime: "<version>", hostConfig: hostConfigHash }))
+```
+
+`hostConfigHash` covers the fixed Wasmtime `Config` of §12.2. These
+identities are recorded in evidence, in the signed statement and in startup
+logs.
+
+*Interim:* until switch-over ([RUNTIME-CONFORMANCE.md §5](RUNTIME-CONFORMANCE.md#5-switch-over-gate-python--wasm)),
+the Python reference runtime implements this contract with
+`runtimeHash = sha256(manifest of its files + interpreter version)`.
 
 ## 2. Modes
 
@@ -42,17 +65,23 @@ load(release, trustConfig):
   1. parse     strict canonical JSON; size/depth limits          → REFUSE_MALFORMED
   2. signature DSSE envelope; ≥1 valid Ed25519 signature by a key in trustConfig
                (keys come ONLY from trustConfig, never from the bundle)  → REFUSE_SIGNATURE
-  3. hashes    artifactHash, irHash, traceHash, evidenceHash recomputed and equal
-               to the signed statement                              → REFUSE_INTEGRITY
+  3. hashes    artifactHash (which covers policy + capabilities), irHash, traceHash,
+               evidenceHash recomputed and equal to the signed statement;
+               engineHash of the component about to be instantiated equals
+               the statement's engine AND is in trustConfig.engines  → REFUSE_INTEGRITY
   4. compat    format known; runtimeContract supported; every `requires`
                capability implemented at that major version          → REFUSE_INCOMPATIBLE
   5. policy    statement.verification.decision == RELEASABLE;
                profile allowed by mode; runtime match rule (§3.1);
-               signer allowed for this application name (optional)    → REFUSE_POLICY
+               signer allowed for this application name (optional);
+               artifact.capabilities.granted ⊆ trustConfig.capabilityCeiling → REFUSE_POLICY
   6. inputs    every declared secret present and non-empty; every setting
                valid; capability providers (e.g. SQL driver) available → REFUSE_INPUTS
   7. freeze    artifact becomes an immutable in-memory structure
-  8. serve
+  8. link      the host linker defines ONLY sdc:runtime interfaces; granted effect
+               interfaces get real implementations, ungranted ones get deny stubs;
+               the component is instantiated once as a check (unknown import → REFUSE_INCOMPATIBLE)
+  9. serve
 ```
 
 - Every refusal exits the process with code 3, before any socket is opened,
@@ -67,16 +96,26 @@ load(release, trustConfig):
 The evidence records the `runtimeHash` it was produced on. The trust config
 sets `runtime-match`:
 
-- `exact` (**default**): the executing `runtimeHash` must equal the evidence
-  runtime. After a runtime patch, re-verify: this needs a new evidence
-  document and statement, but no recompilation.
+- `exact` (**default**): the executing `runtimeHash` (host + engine +
+  Wasmtime + config) must equal the evidence runtime. After a runtime patch,
+  re-verify: this needs a new evidence document and statement, but no
+  recompilation.
+- `engine`: `engineHash` must be equal, while the host may be any
+  conformant host of the same contract (for example the same host version on
+  another platform). This is logged at startup. The engine is
+  platform-independent, so this mode supports multi-platform fleets.
 - `contract`: any runtime implementing the same contract and capability
   majors is accepted. This is weaker, and it is logged at startup.
 
 ## 4. Memory model
 
 - The artifact is immutable after load (§3 step 7). No code path writes to it.
-- Each request is processed with request-local state only.
+- Each request is processed with request-local state only. On the Wasm
+  runtime this is structural: **one fresh engine instance per request**, with
+  its own linear memory, dropped (and zeroed by Wasmtime) afterwards. A defect
+  triggered by one request cannot affect another request's memory.
+- Per-instance memory is capped by a Wasmtime resource limiter derived from
+  `limits` and `deployment.resources`.
 - Process-wide mutable state is limited to capability-owned state (metrics
   counters, connection pools) behind the capability interfaces.
 - Metrics storage is bounded, using fixed-bucket histograms instead of the
@@ -87,6 +126,9 @@ sets `runtime-match`:
 - Requests are independent and may execute concurrently, up to
   `limits.maxConcurrency`. Excess requests are rejected with the
   `unavailable` outcome.
+- The host is asynchronous. Each engine instance is single-threaded (the
+  Wasm `threads` proposal is not used). Host capability calls may suspend the
+  instance without blocking an OS thread.
 - The meaning of an artifact never depends on scheduling. There is no shared
   mutable application state, so this holds by construction.
 - Data consistency is the store capability's responsibility, as governed by
@@ -94,8 +136,19 @@ sets `runtime-match`:
 
 ## 6. I/O and capabilities
 
-The artifact performs I/O **only** through capabilities it declares in
-`requires` ([ADR-0015](ADR/0015-capability-based-runtime.md)). Capabilities in contract 1:
+The artifact performs I/O **only** through capabilities
+([ADR-0015](ADR/0015-capability-based-runtime.md)). Two artifact fields
+govern this, and they must not be confused:
+
+- `requires` states what the **runtime must implement** (compatibility, step
+  4), e.g. `authn.jwt/1`;
+- `capabilities.granted` states what **this program is allowed to use**
+  (authority, steps 5 and 8), declared in source
+  ([POLICY.md §4](POLICY.md#4-capability-model)).
+
+On the Wasm runtime, each capability is an interface of the `sdc:runtime` WIT
+world, implemented by the host. The engine component imports nothing else
+(INV-27). Capabilities in contract 1:
 
 | Capability | Provides | Notes |
 |---|---|---|
@@ -104,12 +157,23 @@ The artifact performs I/O **only** through capabilities it declares in
 | `authz.policy/1` | Deny-precedence rule evaluation | Default deny; decision returns the matching rule ids |
 | `store.sql/1` | Parameterized reads by key and tenant | No silent fallback (fixes D14); unavailability yields the `unavailable` outcome |
 | `store.fixture/1` | In-memory fixtures | **Verify mode only** |
-| `log/1` | Structured JSON to stdout | Redaction of sensitive fields is enforced by the capability |
+| `log/1` | Structured JSON to stdout | Closed-vocabulary fields only; `personal` and `secret` values can never be logged (enforced by the capability) |
 | `metrics/1` | Prometheus text on `/metrics` | Bounded |
-| `clock/1`, `random/1` | Time and randomness | Injected, so verification is deterministic |
+| `clock/1`, `random/1` | Time and randomness | Host-internal only (token expiry, request ids); **not exposed to the engine** in contract 1. Injected in verify mode for determinism |
+
+| Capability | WIT interface | Kind |
+|---|---|---|
+| Artifact access | `sdc:runtime/artifact` | kernel (always linked, no effect) |
+| Authorization decisions | `sdc:runtime/policy` | kernel (host PDP) |
+| Data access | `sdc:runtime/store` | effect (requires a `store` grant) |
+| Logging | `sdc:runtime/log` | effect (requires a `log` grant) |
+| Metrics | `sdc:runtime/metrics` | effect (requires a `metrics` grant) |
+| Inbound HTTP | engine export `handler` | effect (requires an `http.inbound` grant) |
 
 Not available in contract 1: outbound network, filesystem, subprocesses,
-dynamic loading. **Default deny for all of them.**
+environment variables, secrets, dynamic loading. **Default deny for all of
+them.** On Wasm they are not merely denied but *unrepresentable*: no
+interface exists that the engine could import.
 
 ## 7. Networking
 
@@ -147,61 +211,87 @@ stdout.
 
 ## 11. Security boundaries and resource limits
 
-- Authentication and authorization are evaluated by the runtime, from
-  artifact data, before any store read that returns data. `read-one` loads the
+- Authentication and authorization are evaluated by the **host**, from
+  artifact data, before any store read that returns data (INV-29). The engine
+  receives an opaque principal and obtains data only with a host-issued
+  decision handle ([POLICY.md §5](POLICY.md#5-where-each-control-is-enforced)). `read-one` loads the
   row once for authorization, then projects it. `read-list` filters by tenant
   in the query, then applies the policy to each row.
 - A missing required claim is `unauthenticated`. **A missing claim never
   defaults to a value** (fixes D14).
 - Secrets come from a runtime secret source (environment or mounted files).
   Their names are declared in the artifact, their values are never logged,
-  and a missing value refuses startup.
+  and a missing value refuses startup. Secret values are used only inside the
+  host and **never enter the engine component**.
+- Access logs never contain query strings, request bodies or row values. They
+  contain only the closed-vocabulary fields of POLICY.md §4.4.
 - Identity telemetry (`artifactHash`, `buildId`, name and version) comes from
   the verified release only (INV-21, fixes D13).
-- Resource limits are enforced in-process from `limits` (request size,
-  timeout, concurrency) and at the OS level from the sandbox profile (§13).
+- Resource limits are enforced by the host from `limits` (request size,
+  timeout, concurrency), and per instance by Wasmtime (memory limiter,
+  interruption, §12.2).
 
 ## 12. Execution technology decision
 
-Given the contract above:
+### 12.1 Decision (amended by ADR-0016)
 
-- The artifact contains no general computation. It is a closed vocabulary of
-  operations, policies and mappings.
-- The MVP already demonstrated an interpreter design: `Policy.decide`
-  interprets rules as data, and the generated "code" only pasted data into a
-  fixed template.
+Given the contract above, the execution design is:
 
-**Decision: a declarative artifact interpreted by a fixed runtime.**
+**a declarative artifact, interpreted by a fixed `sdc-engine` WebAssembly
+component, running on Wasmtime inside a native host that owns every
+capability.** This is ADOPTED WITH CONDITIONS
+([WASM-EVALUATION.md](WASM-EVALUATION.md)).
 
-| Alternative | Rejected because |
+| Alternative | Status |
 |---|---|
-| Generated source per language (the MVP) | Needs language backends; the generated code becomes an unverifiable TCB; it violates the no-backend principle |
-| Custom bytecode / VM | No general computation needs to be executed. A VM would add an instruction set, a verifier and a language by the back door |
-| WASM | Designed to isolate untrusted code, and there is no code. It could only be reconsidered if a future extension requires user-supplied computation, which would need a new ADR |
-| Native compilation | Same objections as generated source. Performance is not the bottleneck at this vocabulary size |
+| Generated source per language (the MVP) | Rejected: needs language backends; generated code becomes an unverifiable TCB |
+| Per-app Wasm, generated or emitted by SDC | Rejected: turns SDC into a conventional compiler; the artifact becomes opaque (ADR-0016, W1/W2) |
+| Custom bytecode / VM | Rejected: an instruction set is a language by the back door; SDC would own a sandbox. **SDC implements no proprietary instruction set or VM in v1** |
+| Native compilation | Rejected: same objections as generated source |
+| Python interpreter process (the v1 freeze) | **Interim reference** until switch-over; isolation depends on the OS sandbox |
+| **Fixed engine component on Wasmtime** | **Adopted.** The interpreter is confined to typed capabilities; capability denial is provable from the binary; secrets stay in the host |
 
-The reference runtime is Python, preserving the MVP's `runtime.py`
-components. A runtime in any other language is only another implementation of
-**this contract**. It must pass `tests/conformance` and is identified by its
-own `runtimeHash`. It is not a "backend", because the artifact bytes are
-identical for every runtime.
+Wasm is the substrate, not the architecture. The artifact bytes, their
+meaning and their identity are exactly the same on the Python runtime and the
+Wasm runtime.
+
+### 12.2 Fixed Wasmtime configuration
+
+The host uses exactly this configuration, recorded in `hostConfigHash`:
+
+| Setting | Value | Why |
+|---|---|---|
+| Component model | enabled | The engine is a component |
+| WASI | **not linked** (no `add_to_linker` of any WASI interface) | INV-27 |
+| Threads, shared memory | disabled | Determinism; not needed |
+| Relaxed SIMD | disabled | Determinism |
+| NaN canonicalization | enabled | Determinism |
+| Memory | fixed per-instance maximum via a resource limiter | Deterministic growth failure; memory cap |
+| Interruption | **fuel** in `verify` mode (deterministic); **epoch** deadline in `production` (wall-clock `requestTimeoutMs`) | Timeouts in production are wall-clock; verify-mode replay stays deterministic |
+| Allocation | pooling allocator | Per-request instantiation cost |
+| Precompiled code | loaded only from a host-private cache produced by this host build and configuration; never from a release, the network or a shared path (INV-30) | `Component::deserialize` is `unsafe` for untrusted bytes |
+| Wasmtime version | a supported LTS release, pinned in the runtime lock | Security backports guaranteed for supported releases |
 
 ## 13. Isolation (sandbox)
 
-The artifact is data, so there is no untrusted code in the process. The
-sandbox is defense in depth against defects in the trusted runtime, such as
-HTTP parsing bugs. The contract requires the deployment to be able to enforce:
+With the Wasm substrate, isolation has two layers:
+
+| Layer | Provides | Technology |
+|---|---|---|
+| **In-process (primary)** | Engine confinement: linear-memory isolation, no raw syscalls, type-checked control flow, imports as its complete authority, per-instance memory and CPU limits | Wasmtime (Component Model), fixed configuration §12.2 |
+| **Host process (defense in depth)** | Limits the damage if the host or Wasmtime itself has a defect | OS controls: read-only filesystem except the release and trust config, network egress only to granted store hosts, CPU and memory limits, no privilege escalation |
+
+The host-process controls are derived from the artifact as before:
 
 | Control | Derived from |
 |---|---|
-| Filesystem: read-only, release + trust config + secrets mount only | Fixed |
-| Network: listen on the declared port; egress only to declared dependency hosts | `requires` + `dependencies` |
+| Filesystem: read-only; release + trust config + secrets mount + private code cache only | Fixed |
+| Network: listen on the declared port; egress only to granted store dependency hosts | `capabilities` + `dependencies` |
 | CPU / memory / process limits | `deployment` resources |
 | Secret access: only the declared secret names | `inputs.secrets` |
 | No privilege escalation, no new executables | Fixed |
 
-`sdc build` with `Packaging: container` emits a sandbox profile (a seccomp
-profile, a network-policy description and resource limits) next to the
-package. The enforcing technology (containers, gVisor, Landlock, …) is an open
-decision ([ROADMAP.md](ROADMAP.md#risks-and-unresolved-decisions)). The
-contract is independent of that choice.
+The former open decision U6 (sandbox technology) is resolved for the primary
+layer by ADR-0016. The OS technology for the defense-in-depth layer remains a
+deployment choice, and SDC emits the profile (seccomp and network policy) for
+`Packaging: container`.
